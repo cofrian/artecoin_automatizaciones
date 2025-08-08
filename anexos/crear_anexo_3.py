@@ -4,7 +4,21 @@ from pathlib import Path
 import pandas as pd
 from docxtpl import DocxTemplate
 from datetime import datetime
+from io import BytesIO
+import time
+import subprocess
+import re
+import unicodedata
 
+# Hacer opcional pywin32
+try:
+    import win32com.client as win32_client
+    import pythoncom
+    from win32com.client import constants
+except Exception:
+    win32_client = None
+    pythoncom = None
+    constants = None
 
 # --------------------------------------------------------------------
 # 1) CONFIGURACIÓN ----------------------------------------------------
@@ -16,6 +30,8 @@ EXCEL_PATH = (
     / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1_V20.xlsx"
 )
 TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_3.docx"
+# Cachear la plantilla en memoria para reuso (más rápido que leer de disco cada vez)
+TEMPLATE_BYTES = Path(TEMPLATE_DOC).read_bytes()
 OUTPUT_PATH = BASE_DIR / "ANEXO_3.docx"
 
 SHEET_MAP = {
@@ -93,6 +109,81 @@ def load_and_clean_sheets(xls_path, sheet_map):
         return result
 
 
+
+def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
+    """
+    Actualiza campos en **lote** usando una sola instancia de Word.
+    - Campos normales: se actualizan uno a uno saltando TOC/Index/TOA.
+    - TOC (Tabla de contenido): si toc_mode == "pn", solo UpdatePageNumbers(); si "full", Update().
+    """
+    if win32_client is None or pythoncom is None:
+        print("   ! pywin32 no disponible. Omite actualización de campos.")
+        return
+    pythoncom.CoInitialize()
+    try:
+        word_app = win32_client.Dispatch("Word.Application")
+        word_app.Visible = False
+        word_app.ScreenUpdating = False
+        word_app.DisplayAlerts = False
+
+        for doc_path in doc_paths:
+            doc_path = str(doc_path)
+            if not Path(doc_path).exists():
+                print(f"   ! No existe: {doc_path}")
+                continue
+            try:
+                doc = word_app.Documents.Open(
+                    doc_path, ConfirmConversions=False, ReadOnly=False,
+                    AddToRecentFiles=False, Visible=False,
+                )
+            except Exception as e:
+                print(f"   ! No se pudo abrir: {doc_path} -> {e}")
+                continue
+
+            # 1) Actualizar campos no-TOC/Index/TOA
+            try:
+                fields_count = doc.Fields.Count
+                if fields_count > 0 and constants is not None:
+                    for i in range(1, fields_count + 1):
+                        try:
+                            fld = doc.Fields(i)
+                            t = fld.Type
+                            if t in (constants.wdFieldTOC, constants.wdFieldIndex, constants.wdFieldTOA):
+                                continue
+                            fld.Update()
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"   ! Error al actualizar campos normales en {doc_path}: {e}")
+
+            # 2) TOC: solo paginación (rápido) o actualización completa si se pide
+            try:
+                toc_count = doc.TablesOfContents.Count
+                if toc_count > 0:
+                    for i in range(1, toc_count + 1):
+                        toc = doc.TablesOfContents(i)
+                        try:
+                            if toc_mode == "full":
+                                toc.Update()
+                            else:
+                                toc.UpdatePageNumbers()
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"   ! Error al actualizar TOC en {doc_path}: {e}")
+
+            # Guardar y cerrar
+            try:
+                doc.Save()
+                doc.Close(SaveChanges=False)
+            except Exception as e:
+                print(f"   ! Error al guardar/cerrar {doc_path}: {e}")
+        # Cerrar Word
+        word_app.Quit()
+    finally:
+        pythoncom.CoUninitialize()
+
+
 def clean_filename(filename):
     """Limpia el nombre del archivo eliminando caracteres no válidos y tildes para Windows."""
     # Caracteres no válidos en Windows: < > : " | ? * \ /
@@ -104,14 +195,10 @@ def clean_filename(filename):
         cleaned = cleaned.replace(char, "")
 
     # Reemplazar letras con tilde por su versión sin tilde
-    import unicodedata
-
     cleaned = unicodedata.normalize("NFD", cleaned)
     cleaned = "".join(c for c in cleaned if unicodedata.category(c) != "Mn")
 
     # Reemplazar múltiples espacios y guiones bajos consecutivos
-    import re
-
     cleaned = re.sub(r"[_\s]+", " ", cleaned).strip()
 
     # Limitar la longitud (Windows tiene límite de 260 caracteres para la ruta completa)
@@ -157,36 +244,25 @@ def get_totales_edificio(
 def cerrar_word_procesos():
     """Cierra todos los procesos de Word para evitar conflictos de archivos."""
     try:
-        import subprocess
-        import time
-
         print("-> Cerrando procesos de Word...")
 
-        # Intentar cerrar Word de forma elegante primero
-        try:
-            import win32com.client
-            import pythoncom
-
+        # Intentar cerrar Word de forma elegante si pywin32 está disponible
+        if win32_client is not None and pythoncom is not None:
             pythoncom.CoInitialize()
             try:
-                word_app = win32com.client.GetActiveObject("Word.Application")
-                if word_app.Documents.Count > 0:
-                    print(
-                        f"   Cerrando {word_app.Documents.Count} documentos abiertos..."
-                    )
-                    # Cerrar todos los documentos sin guardar
-                    for doc in word_app.Documents:
-                        doc.Close(SaveChanges=False)
-                word_app.Quit()
-                print("   * Word cerrado correctamente")
-            except Exception:
-                # Si no hay instancia de Word activa, no hay problema
-                pass
+                try:
+                    word_app = win32_client.GetActiveObject("Word.Application")
+                    if word_app.Documents.Count > 0:
+                        print(f"   Cerrando {word_app.Documents.Count} documentos abiertos...")
+                        for doc in word_app.Documents:
+                            doc.Close(SaveChanges=False)
+                    word_app.Quit()
+                    print("   * Word cerrado correctamente")
+                except Exception:
+                    # Si no hay instancia activa, continuar
+                    pass
             finally:
                 pythoncom.CoUninitialize()
-        except ImportError:
-            # Si no está disponible win32com, usar método directo
-            pass
 
         # Forzar cierre de cualquier proceso restante
         result = subprocess.run(
@@ -201,7 +277,6 @@ def cerrar_word_procesos():
         else:
             print("   * No había procesos de Word ejecutándose")
 
-        # Esperar un momento para que el sistema libere los archivos
         time.sleep(2)
 
     except subprocess.TimeoutExpired:
@@ -271,10 +346,11 @@ def get_user_input():
             else:
                 anio = int(anio_input)
 
-            if anio - 5 <= anio <= anio + 5:  # Rango razonable de años
+            # Usar el año actual como referencia para el rango permitido
+            if current_year - 5 <= anio <= current_year + 5:  # Rango razonable de años
                 break
             else:
-                print(f"Error: El año debe estar entre {anio - 5} y {anio + 5}")
+                print(f"Error: El año debe estar entre {current_year - 5} y {current_year + 5}")
         except ValueError:
             print("Error: Por favor ingrese un año válido")
 
@@ -310,28 +386,22 @@ print("* Datos cargados y limpiados")
 # Crear documento Word
 def update_word_fields(doc_path):
     """Actualiza los campos del documento Word."""
+    if win32_client is None or pythoncom is None:
+        print("   ! Para actualizar automáticamente el índice, instala: pip install pywin32")
+        return
+
     try:
-        import win32com.client
-        import pythoncom
-
-        # Inicializar COM
         pythoncom.CoInitialize()
-
         try:
-            # Crear una nueva instancia de Word para evitar conflictos
-            word_app = win32com.client.Dispatch("Word.Application")
-
-            # Optimizaciones de rendimiento
+            word_app = win32_client.Dispatch("Word.Application")
             word_app.Visible = False
             word_app.ScreenUpdating = False
             word_app.DisplayAlerts = False
 
-            # Verificar que el archivo existe
             if not Path(doc_path).exists():
                 print(f"   ! El archivo no existe: {doc_path}")
                 return
 
-            # Abrir documento con manejo de errores
             try:
                 doc = word_app.Documents.Open(
                     str(doc_path),
@@ -344,7 +414,6 @@ def update_word_fields(doc_path):
                 print(f"   ! No se pudo abrir el documento: {e}")
                 return
 
-            # Intentar actualizar campos con verificación
             try:
                 if doc.Range().Fields.Count > 0:
                     doc.Range().Fields.Update()
@@ -354,7 +423,6 @@ def update_word_fields(doc_path):
             except Exception as e:
                 print(f"   ! Error al actualizar campos: {e}")
 
-            # Guardar y cerrar
             try:
                 doc.Save()
                 doc.Close(SaveChanges=False)
@@ -362,19 +430,10 @@ def update_word_fields(doc_path):
                 print(f"   ! Error al guardar: {e}")
                 doc.Close(SaveChanges=False)
 
-            # Cerrar Word
             word_app.Quit()
             print("   * Proceso completado")
-
-        except Exception as e:
-            print(f"   ! Error en el proceso: {e}")
-
         finally:
-            # Limpiar COM
             pythoncom.CoUninitialize()
-
-    except ImportError:
-        print("   ! Para actualizar automáticamente el índice, instala: pip install pywin32")
     except Exception as e:
         print(f"   ! Error general al actualizar índice: {e}")
         print("   * El documento se generó correctamente, solo falló la actualización del índice")
@@ -382,6 +441,8 @@ def update_word_fields(doc_path):
 
 # Crear contexto para la plantilla
 print("-> Renderizando documentos...")
+
+generated_docs = []
 edificios_por_seccion = {
     key: df["EDIFICIO"].unique()[:-1] for key, df in all_dataframes.items()
 }
@@ -442,7 +503,7 @@ for edificio in sorted(edificios_totales):
         "totales_otros_eq": [totales_otros_eq],
     }
 
-    doc = DocxTemplate(TEMPLATE_DOC)
+    doc = DocxTemplate(BytesIO(TEMPLATE_BYTES))
     doc.render(context)
 
     try:
@@ -455,9 +516,7 @@ for edificio in sorted(edificios_totales):
         doc.save(str(output_path))
         print(f"* Documento generado: {output_file}")
 
-        # Actualizar campos
-        update_word_fields(str(output_path))
-
+        generated_docs.append(str(output_path))
     except PermissionError as e:
         print(f"   ! Error de permisos con {output_file}: {e}")
         print("   ! Saltando este archivo...")
@@ -466,6 +525,8 @@ for edificio in sorted(edificios_totales):
         print(f"   ! Error inesperado con {output_file}: {e}")
         continue
 
+print("\nActualizando campos en lote (TOC: solo paginación)...")
+update_word_fields_bulk(generated_docs, toc_mode="pn")
 print("\nTodos los documentos generados correctamente.")
 
 # Mensaje final sobre archivos generados

@@ -5,6 +5,23 @@ import pandas as pd
 from docxtpl import DocxTemplate
 from datetime import datetime
 
+# NUEVOS IMPORTS MOVIDOS DESDE FUNCIONES
+import subprocess
+import time
+import unicodedata
+import re
+
+# Imports opcionales de pywin32
+try:
+    import win32com.client as win32_client
+    from win32com.client import constants as win32_constants
+    import pythoncom
+    HAS_PYWIN32 = True
+except ImportError:
+    win32_client = None
+    win32_constants = None
+    pythoncom = None
+    HAS_PYWIN32 = False
 
 # --------------------------------------------------------------------
 # 1) CONFIGURACIÓN ----------------------------------------------------
@@ -93,7 +110,6 @@ def clean_filename(filename):
     Limpia el nombre del archivo eliminando caracteres no válidos
     y tildes para Windows.
     """
-    # Caracteres no válidos en Windows: < > : " | ? * \ /
     invalid_chars = '<>:"|?*\\/“”'
     cleaned = filename
 
@@ -102,14 +118,10 @@ def clean_filename(filename):
         cleaned = cleaned.replace(char, "")
 
     # Reemplazar letras con tilde por su versión sin tilde
-    import unicodedata
-
     cleaned = unicodedata.normalize("NFD", cleaned)
     cleaned = "".join(c for c in cleaned if unicodedata.category(c) != "Mn")
 
     # Reemplazar múltiples espacios y guiones bajos consecutivos
-    import re
-
     cleaned = re.sub(r"[_\s]+", " ", cleaned).strip()
 
     # Limitar la longitud (Windows tiene límite de 260 caracteres para la ruta completa)
@@ -155,36 +167,29 @@ def get_totales_edificio(
 def cerrar_word_procesos():
     """Cierra todos los procesos de Word para evitar conflictos de archivos."""
     try:
-        import subprocess
-        import time
-
         print("-> Cerrando procesos de Word...")
 
-        # Intentar cerrar Word de forma elegante primero
-        try:
-            import win32com.client
-            import pythoncom
-
+        # Intentar cerrar Word con COM si está disponible
+        if HAS_PYWIN32:
             pythoncom.CoInitialize()
             try:
-                word_app = win32com.client.GetActiveObject("Word.Application")
-                if word_app.Documents.Count > 0:
-                    print(
-                        f"   Cerrando {word_app.Documents.Count} documentos abiertos..."
-                    )
-                    # Cerrar todos los documentos sin guardar
-                    for doc in word_app.Documents:
-                        doc.Close(SaveChanges=False)
-                word_app.Quit()
-                print("   * Word cerrado correctamente")
-            except Exception:
-                # Si no hay instancia de Word activa, no hay problema
-                pass
+                try:
+                    word_app = win32_client.GetActiveObject("Word.Application")
+                except Exception:
+                    word_app = None
+
+                if word_app is not None:
+                    if word_app.Documents.Count > 0:
+                        print(f"   Cerrando {word_app.Documents.Count} documentos abiertos...")
+                        for doc in list(word_app.Documents):
+                            try:
+                                doc.Close(SaveChanges=False)
+                            except Exception:
+                                pass
+                    word_app.Quit()
+                    print("   * Word cerrado correctamente")
             finally:
                 pythoncom.CoUninitialize()
-        except ImportError:
-            # Si no está disponible win32com, usar método directo
-            pass
 
         # Forzar cierre de cualquier proceso restante
         result = subprocess.run(
@@ -193,13 +198,11 @@ def cerrar_word_procesos():
             text=True,
             timeout=10,
         )
-
         if result.returncode == 0:
             print("   * Procesos de Word forzados a cerrar")
         else:
             print("   * No había procesos de Word ejecutándose")
 
-        # Esperar un momento para que el sistema libere los archivos
         time.sleep(2)
 
     except subprocess.TimeoutExpired:
@@ -263,16 +266,16 @@ def get_user_input():
             anio_input = input(
                 f"Ingrese el año [Enter para usar {current_year}]: "
             ).strip()
-
             if anio_input == "":
                 anio = current_year
             else:
                 anio = int(anio_input)
 
-            if anio - 5 <= anio <= anio + 5:  # Rango razonable de años
+            min_year, max_year = current_year - 5, current_year + 5
+            if min_year <= anio <= max_year:
                 break
             else:
-                print(f"Error: El año debe estar entre {anio - 5} y {anio + 5}")
+                print(f"Error: El año debe estar entre {min_year} y {max_year}")
         except ValueError:
             print("Error: Por favor ingrese un año válido")
 
@@ -301,76 +304,81 @@ print("* Datos cargados y limpiados")
 
 
 # Crear documento Word
-def update_word_fields(doc_path):
-    """Actualiza los campos del documento Word."""
-    try:
-        import win32com.client
-        import pythoncom
+# def update_word_fields(doc_path):
+#     """Actualiza los campos del documento Word."""
+#     try:
+#         if not Path(doc_path).exists():
+#             print(f"   ! El archivo no existe: {doc_path}")
+#             return
 
-        # Inicializar COM
-        pythoncom.CoInitialize()
+#         if not HAS_PYWIN32:
+#             print("   ! Para actualizar automáticamente el índice, instala: pip install pywin32")
+#             return
 
-        try:
-            # Crear una nueva instancia de Word para evitar conflictos
-            word_app = win32com.client.Dispatch("Word.Application")
+#         pythoncom.CoInitialize()
+#         try:
+#             word_app = win32_client.Dispatch("Word.Application")
+#             word_app.Visible = False
+#             word_app.ScreenUpdating = False
+#             word_app.DisplayAlerts = False
 
-            # Optimizaciones de rendimiento
-            word_app.Visible = False
-            word_app.ScreenUpdating = False
-            word_app.DisplayAlerts = False
+#             try:
+#                 doc = word_app.Documents.Open(
+#                     str(doc_path),
+#                     ConfirmConversions=False,
+#                     ReadOnly=False,
+#                     AddToRecentFiles=False,
+#                     Visible=False,
+#                 )
+#             except Exception as e:
+#                 print(f"   ! No se pudo abrir el documento: {e}")
+#                 word_app.Quit()
+#                 return
 
-            # Verificar que el archivo existe
-            if not Path(doc_path).exists():
-                print(f"   ! El archivo no existe: {doc_path}")
-                return
+#             try:
+#                 count_fields = doc.Fields.Count
+#                 if count_fields > 0:
+#                     for i in range(1, count_fields + 1):
+#                         try:
+#                             fld = doc.Fields(i)
+#                             t = fld.Type
+#                             if win32_constants and t in (
+#                                 win32_constants.wdFieldTOC,
+#                                 win32_constants.wdFieldIndex,
+#                                 win32_constants.wdFieldTOA,
+#                             ):
+#                                 continue
+#                             try:
+#                                 fld.Update()
+#                             except Exception:
+#                                 pass
+#                         except Exception:
+#                             pass
+#                     print("   * Campos actualizados correctamente")
+#                 else:
+#                     print("   * No hay campos para actualizar")
+#             except Exception as e:
+#                 print(f"   ! Error al actualizar campos: {e}")
 
-            # Abrir documento con manejo de errores
-            try:
-                doc = word_app.Documents.Open(
-                    str(doc_path),
-                    ConfirmConversions=False,
-                    ReadOnly=False,
-                    AddToRecentFiles=False,
-                    Visible=False,
-                )
-            except Exception as e:
-                print(f"   ! No se pudo abrir el documento: {e}")
-                return
+#             try:
+#                 doc.Save()
+#             except Exception as e:
+#                 print(f"   ! Error al guardar: {e}")
+#             finally:
+#                 try:
+#                     doc.Close(SaveChanges=False)
+#                 except Exception:
+#                     pass
 
-            # Intentar actualizar campos con verificación
-            try:
-                if doc.Range().Fields.Count > 0:
-                    doc.Range().Fields.Update()
-                    print("   * Campos actualizados correctamente")
-                else:
-                    print("   * No hay campos para actualizar")
-            except Exception as e:
-                print(f"   ! Error al actualizar campos: {e}")
+#             word_app.Quit()
+#             print("   * Proceso completado")
 
-            # Guardar y cerrar
-            try:
-                doc.Save()
-                doc.Close(SaveChanges=False)
-            except Exception as e:
-                print(f"   ! Error al guardar: {e}")
-                doc.Close(SaveChanges=False)
+#         finally:
+#             pythoncom.CoUninitialize()
 
-            # Cerrar Word
-            word_app.Quit()
-            print("   * Proceso completado")
-
-        except Exception as e:
-            print(f"   ! Error en el proceso: {e}")
-
-        finally:
-            # Limpiar COM
-            pythoncom.CoUninitialize()
-
-    except ImportError:
-        print("   ! Para actualizar automáticamente el índice, instala: pip install pywin32")
-    except Exception as e:
-        print(f"   ! Error general al actualizar índice: {e}")
-        print("   * El documento se generó correctamente, solo falló la actualización del índice")
+#     except Exception as e:
+#         print(f"   ! Error general al actualizar índice: {e}")
+#         print("   * El documento se generó correctamente, solo falló la actualización del índice")
 
 
 # Crear contexto para la plantilla
@@ -412,7 +420,7 @@ for edificio in sorted(edificios_totales):
         print(f"* Documento generado: {output_file}")
 
         # Actualizar campos
-        update_word_fields(str(output_path))
+        # update_word_fields(str(output_path))
 
     except PermissionError as e:
         print(f"   ! Error de permisos con {output_file}: {e}")
@@ -423,6 +431,7 @@ for edificio in sorted(edificios_totales):
         continue
 
 print("\nTodos los documentos generados correctamente.")
+
 
 # Mensaje final sobre archivos generados
 print(f"\n{'=' * 60}")

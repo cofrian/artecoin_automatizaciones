@@ -11,6 +11,7 @@ import win32com.client
 import pythoncom
 from pypdf import PdfWriter
 from docxtpl import DocxTemplate
+from concurrent.futures import ProcessPoolExecutor, as_completed  # MOVIDO ARRIBA
 
 """
 Crear Anexo 6
@@ -57,6 +58,7 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "salida_anexo_6"
 # --------------------------------------------------------------------
 # 2.1) Helpers para mes/año y reemplazo en Word ----------------------
 # --------------------------------------------------------------------
+
 
 def export_template_with_fields_to_pdf(
     template_docx: Path, out_pdf: Path, mes: str, anio: str
@@ -177,6 +179,10 @@ def word_to_pdf(docx_path: Path, pdf_out_path: Path) -> None:
         pythoncom.CoUninitialize()
 
 
+ENDS_OK_RE = re.compile(r"(?i)CEE[_\s-]*ACTUAL\.pdf$")
+E_NUM_RE = re.compile(r"(?i)[_\s-]E(\d+)[_\s-]CEE[_\s-]*ACTUAL\.pdf$")
+
+
 def find_certificates(edificio_dir: Path) -> List[Tuple[int, Path]]:
     """
     Busca PDFs de certificados en la carpeta del edificio **y subcarpetas**.
@@ -188,17 +194,34 @@ def find_certificates(edificio_dir: Path) -> List[Tuple[int, Path]]:
     Devuelve lista de tuplas (orden_E, ruta_pdf).
     """
     certs: List[Tuple[int, Path]] = []
-    ends_ok = re.compile(r"(?i)CEE[_\s-]*ACTUAL\.pdf$")
-    e_pattern = re.compile(r"(?i)[_\s-]E(\d+)[_\s-]CEE[_\s-]*ACTUAL\.pdf$")
     for pdf in edificio_dir.rglob("*.pdf"):
         name = pdf.name
-        if ends_ok.search(name):
-            m = e_pattern.search(name)
+        if ENDS_OK_RE.search(name):
+            m = E_NUM_RE.search(name)
             order = int(m.group(1)) if m else 1
             certs.append((order, pdf))
 
     certs.sort(key=lambda x: (x[0], x[1].name.lower()))
     return certs
+
+
+def merge_pdfs_fast(output_pdf: Path, pdf_paths: List[Path]) -> None:
+    """
+    Une PDFs prefiriendo pikepdf (rápido/robusto). Si no está disponible, usa pypdf (PdfWriter).
+    """
+    try:
+        import pikepdf  # type: ignore
+
+        with pikepdf.Pdf.new() as dst:
+            for p in pdf_paths:
+                with pikepdf.open(str(p)) as src:
+                    dst.pages.extend(src.pages)
+            output_pdf.parent.mkdir(parents=True, exist_ok=True)
+            dst.save(str(output_pdf))
+        return
+    except Exception:
+        # Fallback a pypdf
+        merge_pdfs(output_pdf, pdf_paths)
 
 
 def merge_pdfs(output_pdf: Path, pdf_paths: List[Path]) -> None:
@@ -249,10 +272,13 @@ def get_user_input():
                 f"Ingrese el año [Enter para usar {current_year}]: "
             ).strip()
             anio = current_year if anio_input == "" else int(anio_input)
-            if anio - 5 <= anio <= anio + 5:
+            # CORREGIDO: validar contra el año actual
+            if (current_year - 5) <= anio <= (current_year + 5):
                 break
             else:
-                print(f"Error: El año debe estar entre {anio - 5} y {anio + 5}")
+                print(
+                    f"Error: El año debe estar entre {current_year - 5} y {current_year + 5}"
+                )
         except ValueError:
             print("Error: Por favor ingrese un año válido")
     print("\nConfiguración seleccionada:")
@@ -267,6 +293,7 @@ def main():
 
     mes, anio = get_user_input()
     mes_render = mes
+    # CORREGIDO: f-string con salto de línea al inicio
     print(f"\nBuscando edificios en: {BUILDINGS_ROOT}")
 
     if not BUILDINGS_ROOT.exists():
@@ -284,40 +311,83 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Se encontraron {len(edificios)} edificios.")
 
-    for edificio in edificios:
-        print(f"\nProcesando: {edificio.name}")
-        certificados = find_certificates(edificio)
-        if not certificados:
-            print(
-                "  ! No se encontraron certificados energéticos (CEE_ACTUAL) en esta carpeta."
-            )
-            continue
+    # Renderizar plantilla UNA vez y convertirla a PDF
+    plantilla_pdf_compartida = (
+        OUTPUT_DIR / f"_Anexo_6__plantilla_{clean_filename(mes_render)}_{anio}.pdf"
+    )
+    try:
+        export_template_with_fields_to_pdf(
+            TEMPLATE_DOCX, plantilla_pdf_compartida, mes_render, str(anio)
+        )
+    except Exception as e:
+        print(f"Error preparando plantilla PDF: {e}")
+        return
 
-        try:
-            nombre_base = clean_filename(edificio.name)
-            pdf_tmp_plantilla = OUTPUT_DIR / f"_Anexo_6_tmp_{nombre_base}.pdf"
-            pdf_salida = OUTPUT_DIR / f"Anexo_6_{nombre_base}.pdf"
+    carpetas_sin_certs = []
+    resultados = []
 
-            # 1) Generar PDF de la plantilla con mes/año
-            export_template_with_fields_to_pdf(
-                TEMPLATE_DOCX, pdf_tmp_plantilla, mes_render, str(anio)
-            )
-
-            # 2) Unir plantilla + certificados E1..En
-            pdfs_a_unir = [pdf_tmp_plantilla] + [p for _, p in certificados]
-            merge_pdfs(pdf_salida, pdfs_a_unir)
-
-            print(f"  -> Generado: {pdf_salida}")
-        except Exception as e:
-            print(f"  ! Error procesando '{edificio.name}': {e}")
-        finally:
+    # Paralelizar por edificio
+    with ProcessPoolExecutor() as ex:
+        futs = {
+            ex.submit(
+                _worker_procesar_edificio,
+                str(ed),
+                str(plantilla_pdf_compartida),
+                str(OUTPUT_DIR),
+            ): ed
+            for ed in edificios
+        }
+        for fut in as_completed(futs):
+            edificio = futs[fut]
             try:
-                if pdf_tmp_plantilla.exists():
-                    pdf_tmp_plantilla.unlink()
-            except Exception:
-                pass
+                nombre, ok, msg = fut.result()
+                if ok:
+                    print(f"  -> Generado: {msg}")
+                else:
+                    if "Sin certificados" in msg:
+                        print(f"  ! {nombre}: {msg}")
+                        carpetas_sin_certs.append(str(edificio))
+                    else:
+                        print(f"  ! {nombre}: {msg}")
+                resultados.append((nombre, ok, msg))
+            except Exception as e:
+                print(f"  ! {edificio.name}: Error inesperado en worker: {e}")
+                resultados.append((edificio.name, False, f"Error worker: {e}"))
 
-    print(f"\nTerminado. Archivos en: {OUTPUT_DIR}")
+    # Resumen
+    # CORREGIDO: f-string con salto de línea al inicio
+    print("\nResumen:")
+    ok_count = sum(1 for _, ok, _ in resultados if ok)
+    print(f"  Generados OK: {ok_count}/{len(edificios)}")
+    if carpetas_sin_certs:
+        print("  Carpetas sin certificados:")
+        for c in carpetas_sin_certs:
+            print(f"   - {c}")
+    # CORREGIDO: f-string con salto de línea al inicio
+    print(f"\nArchivos en: {OUTPUT_DIR}")
+
+
+def _worker_procesar_edificio(
+    edificio_dir_str: str, plantilla_pdf_str: str, output_dir_str: str
+) -> tuple[str, bool, str]:
+    """
+    Worker de proceso: une plantilla + certificados del edificio.
+    Devuelve (nombre_edificio, ok, mensaje).
+    """
+    try:
+        edificio_dir = Path(edificio_dir_str)
+        plantilla_pdf = Path(plantilla_pdf_str)
+        output_dir = Path(output_dir_str)
+        certificados = find_certificates(edificio_dir)
+        if not certificados:
+            return (edificio_dir.name, False, "Sin certificados")
+        nombre_base = clean_filename(edificio_dir.name)
+        salida_pdf = output_dir / f"Anexo_6_{nombre_base}.pdf"
+        pdfs_a_unir = [plantilla_pdf] + [p for _, p in certificados]
+        merge_pdfs_fast(salida_pdf, pdfs_a_unir)
+        return (edificio_dir.name, True, str(salida_pdf))
+    except Exception as e:
+        return (edificio_dir.name, False, f"Error: {e}")
 
 
 if __name__ == "__main__":

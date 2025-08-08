@@ -5,6 +5,20 @@ import pandas as pd
 from docxtpl import DocxTemplate
 from datetime import datetime
 
+# Hacer opcional pywin32 para actualización de campos en Word
+try:
+    import win32com.client
+    import pythoncom
+    from win32com.client import constants
+    win32_available = True
+except Exception:
+    win32com = None
+    pythoncom = None
+    constants = None
+    win32_available = False
+
+from io import BytesIO
+
 
 # --------------------------------------------------------------------
 # 1) CONFIGURACIÓN ----------------------------------------------------
@@ -16,10 +30,12 @@ EXCEL_PATH = (
     / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1_V20.xlsx"
 )
 TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_2.docx"
+# Cachear la plantilla en memoria para reuso (más rápido que leer de disco cada vez)
+TEMPLATE_BYTES = Path(TEMPLATE_DOC).read_bytes()
 OUTPUT_PATH = BASE_DIR / "ANEXO_3.docx"
 
 SHEET_MAP = {
-    "Conta": "FACTURACIÓN ENERGÉTICA"
+    "Conta": "Conta"
 }
 
 HEADER_ROW = 0  # primera fila
@@ -78,6 +94,81 @@ def load_and_clean_sheets(xls_path, sheet_map):
         return result
 
 
+
+def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
+    """
+    Actualiza campos en **lote** usando una sola instancia de Word.
+    - Campos normales: se actualizan uno a uno saltando TOC/Index/TOA.
+    - TOC (Tabla de contenido): si toc_mode == "pn", solo UpdatePageNumbers(); si "full", Update().
+    """
+    if not win32_available or pythoncom is None:
+        print("   ! pywin32 no disponible. Omite actualización de campos.")
+        return
+    pythoncom.CoInitialize()
+    try:
+        word_app = win32com.client.Dispatch("Word.Application")
+        word_app.Visible = False
+        word_app.ScreenUpdating = False
+        word_app.DisplayAlerts = False
+
+        for doc_path in doc_paths:
+            doc_path = str(doc_path)
+            if not Path(doc_path).exists():
+                print(f"   ! No existe: {doc_path}")
+                continue
+            try:
+                doc = word_app.Documents.Open(
+                    doc_path, ConfirmConversions=False, ReadOnly=False,
+                    AddToRecentFiles=False, Visible=False,
+                )
+            except Exception as e:
+                print(f"   ! No se pudo abrir: {doc_path} -> {e}")
+                continue
+
+            # 1) Actualizar campos no-TOC/Index/TOA
+            try:
+                fields_count = doc.Fields.Count
+                if fields_count > 0 and constants is not None:
+                    for i in range(1, fields_count + 1):
+                        try:
+                            fld = doc.Fields(i)
+                            t = fld.Type
+                            if t in (constants.wdFieldTOC, constants.wdFieldIndex, constants.wdFieldTOA):
+                                continue
+                            fld.Update()
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"   ! Error al actualizar campos normales en {doc_path}: {e}")
+
+            # 2) TOC: solo paginación (rápido) o actualización completa si se pide
+            try:
+                toc_count = doc.TablesOfContents.Count
+                if toc_count > 0:
+                    for i in range(1, toc_count + 1):
+                        toc = doc.TablesOfContents(i)
+                        try:
+                            if toc_mode == "full":
+                                toc.Update()
+                            else:
+                                toc.UpdatePageNumbers()
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"   ! Error al actualizar TOC en {doc_path}: {e}")
+
+            # Guardar y cerrar
+            try:
+                doc.Save()
+                doc.Close(SaveChanges=False)
+            except Exception as e:
+                print(f"   ! Error al guardar/cerrar {doc_path}: {e}")
+        # Cerrar Word
+        word_app.Quit()
+    finally:
+        pythoncom.CoUninitialize()
+
+
 def clean_filename(filename):
     """
     Limpia el nombre del archivo eliminando caracteres no válidos
@@ -119,8 +210,6 @@ def cerrar_word_procesos():
 
         # Intentar cerrar Word de forma elegante primero
         try:
-            import win32com.client
-            import pythoncom
 
             pythoncom.CoInitialize()
             try:
@@ -261,8 +350,6 @@ print("* Datos cargados y limpiados")
 def update_word_fields(doc_path):
     """Actualiza los campos del documento Word."""
     try:
-        import win32com.client
-        import pythoncom
 
         # Inicializar COM
         pythoncom.CoInitialize()
@@ -332,6 +419,8 @@ def update_word_fields(doc_path):
 
 # Crear contexto para la plantilla
 print("-> Renderizando documentos...")
+
+generated_docs = []
 edificios_por_seccion = {
     key: df["EDIFICIO"].unique()[:-1] for key, df in all_dataframes.items()
 }
@@ -353,7 +442,7 @@ for edificio in sorted(edificios_totales):
         "tipo_de_suministro": df_conta_edificio["SUMINISTRO"].unique()
     }
 
-    doc = DocxTemplate(TEMPLATE_DOC)
+    doc = DocxTemplate(BytesIO(TEMPLATE_BYTES))
     doc.render(context)
 
     try:
@@ -366,8 +455,7 @@ for edificio in sorted(edificios_totales):
         doc.save(str(output_path))
         print(f"* Documento generado: {output_file}")
 
-        # Actualizar campos
-        update_word_fields(str(output_path))
+        generated_docs.append(str(output_path))
 
     except PermissionError as e:
         print(f"   ! Error de permisos con {output_file}: {e}")
@@ -377,6 +465,8 @@ for edificio in sorted(edificios_totales):
         print(f"   ! Error inesperado con {output_file}: {e}")
         continue
 
+print("\nActualizando campos en lote (TOC: solo paginación)...")
+update_word_fields_bulk(generated_docs, toc_mode="pn")
 print("\nTodos los documentos generados correctamente.")
 
 # Mensaje final sobre archivos generados
