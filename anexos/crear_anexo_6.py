@@ -58,69 +58,6 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "salida_anexo_6"
 # 2.1) Helpers para mes/año y reemplazo en Word ----------------------
 # --------------------------------------------------------------------
 
-
-def normalizar_mes(mes_input: str) -> str:
-    """Convierte el mes ingresado (número o texto) a nombre en minúsculas en español."""
-    meses = {
-        "1": "enero",
-        "01": "enero",
-        "enero": "enero",
-        "2": "febrero",
-        "02": "febrero",
-        "febrero": "febrero",
-        "3": "marzo",
-        "03": "marzo",
-        "marzo": "marzo",
-        "4": "abril",
-        "04": "abril",
-        "abril": "abril",
-        "5": "mayo",
-        "05": "mayo",
-        "mayo": "mayo",
-        "6": "junio",
-        "06": "junio",
-        "junio": "junio",
-        "7": "julio",
-        "07": "julio",
-        "julio": "julio",
-        "8": "agosto",
-        "08": "agosto",
-        "agosto": "agosto",
-        "9": "septiembre",
-        "09": "septiembre",
-        "septiembre": "septiembre",
-        "10": "octubre",
-        "octubre": "octubre",
-        "11": "noviembre",
-        "noviembre": "noviembre",
-        "12": "diciembre",
-        "diciembre": "diciembre",
-    }
-    key = mes_input.strip().lower()
-    if key not in meses:
-        raise ValueError(f"Mes no reconocido: {mes_input}")
-    return meses[key]
-
-
-def pedir_mes_anio() -> tuple[str, str]:
-    """Pregunta por consola el mes y año. Devuelve (mes_en_minusculas, anio_YYYY)."""
-    while True:
-        mes_in = input(
-            "Introduce el MES (número 1-12 o nombre en español, p.ej. 'agosto'): "
-        ).strip()
-        try:
-            mes = normalizar_mes(mes_in)
-            break
-        except Exception as e:
-            print(f"  Valor inválido: {e}. Intenta de nuevo.")
-    while True:
-        anio = input("Introduce el AÑO (formato YYYY, p.ej. 2025): ").strip()
-        if re.fullmatch(r"\\d{4}", anio):
-            break
-        print("  Año inválido. Debe tener 4 dígitos (YYYY).")
-    return mes, anio
-
-
 def export_template_with_fields_to_pdf(
     template_docx: Path, out_pdf: Path, mes: str, anio: str
 ) -> None:
@@ -358,8 +295,8 @@ def main():
 
         try:
             nombre_base = clean_filename(edificio.name)
-            pdf_tmp_plantilla = OUTPUT_DIR / f"_{nombre_base}_Anexo_6_tmp.pdf"
-            pdf_salida = OUTPUT_DIR / f"{nombre_base}_Anexo_6.pdf"
+            pdf_tmp_plantilla = OUTPUT_DIR / f"_Anexo_6_tmp_{nombre_base}.pdf"
+            pdf_salida = OUTPUT_DIR / f"Anexo_6_{nombre_base}.pdf"
 
             # 1) Generar PDF de la plantilla con mes/año
             export_template_with_fields_to_pdf(
