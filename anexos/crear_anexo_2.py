@@ -15,16 +15,11 @@ EXCEL_PATH = (
     BASE_DIR.parent
     / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1_V20.xlsx"
 )
-TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_3.docx"
+TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_2.docx"
 OUTPUT_PATH = BASE_DIR / "ANEXO_3.docx"
 
 SHEET_MAP = {
-    "Clima": "SISTEMAS DE CLIMATIZACIÓN",
-    "SistCC": "SISTEMAS DE CALEFACCIÓN",
-    "Eleva": "EQUIPOS ELEVADORES",
-    "EqHoriz": "EQUIPOS HORIZONTALES",
-    "Ilum": "SISTEMAS DE ILUMINACIÓN",
-    "OtrosEq": "OTROS EQUIPOS",
+    "Conta": "FACTURACIÓN ENERGÉTICA"
 }
 
 HEADER_ROW = 0  # primera fila
@@ -42,18 +37,8 @@ def delete_rows_optimized(df, columna="ID CENTRO"):
         for i in range(len(df) - 1, -1, -1):
             val = df[columna].iloc[i]
             if pd.notna(val) and str(val).strip() != "" and str(val).strip() != "0":
-                return df.iloc[: i + 2].copy()
+                return df.iloc[: i + 1].copy()
     return df.copy()
-
-
-def clean_last_row(df):
-    """Limpia la última fila de totales."""
-    if df.empty:
-        return df
-    df2 = df.copy()
-    mask = df2.iloc[-1:] == "Total"
-    df2.iloc[-1:] = df2.iloc[-1:].mask(mask, pd.NA)
-    return df2
 
 
 def load_and_clean_sheets(xls_path, sheet_map):
@@ -74,7 +59,7 @@ def load_and_clean_sheets(xls_path, sheet_map):
                 skiprows=SKIP_ROWS,
                 dtype=str,  # usar key, no sheet_name
             )
-            df_cleaned = clean_last_row(delete_rows_optimized(df))
+            df_cleaned = df
 
             # Redondear valores decimales a dos decimales
             for col in df_cleaned.columns:
@@ -85,7 +70,7 @@ def load_and_clean_sheets(xls_path, sheet_map):
                         df_cleaned[col] = df_cleaned[col].round(2)
                 except Exception:
                     pass
-                
+            
             df_cleaned = df_cleaned.fillna("")
 
             result[key] = df_cleaned
@@ -94,7 +79,10 @@ def load_and_clean_sheets(xls_path, sheet_map):
 
 
 def clean_filename(filename):
-    """Limpia el nombre del archivo eliminando caracteres no válidos y tildes para Windows."""
+    """
+    Limpia el nombre del archivo eliminando caracteres no válidos
+    y tildes para Windows.
+    """
     # Caracteres no válidos en Windows: < > : " | ? * \ /
     invalid_chars = '<>:"|?*\\/“”'
     cleaned = filename
@@ -119,39 +107,6 @@ def clean_filename(filename):
         cleaned = cleaned[:100].strip()
 
     return cleaned
-
-
-def get_totales_edificio(
-    df_full: pd.DataFrame, df_edificio: pd.DataFrame, nombre_seccion: str
-) -> dict[str, str]:
-    """
-    - df_full: DataFrame completo (incluye última fila de totales pre-calculados).
-    - df_edificio: Sólo las filas de este edificio (sin fila de totales).
-    """
-    # 1) Detectar columnas que **requieren** un total:
-    ultima_full = df_full.iloc[-1]
-    cols_a_sumar = [
-        col
-        for col in df_full.columns[1:]
-        if pd.notna(ultima_full[col]) and str(ultima_full[col]).strip() != ""
-    ]
-
-    # 2) Construir dict inicial con EDIFICIO
-    totales: dict[str, str] = {"EDIFICIO": "Total general"}
-
-    # 3) Para cada columna que pide total, sumamos df_edificio[col]
-    for col in cols_a_sumar:
-        vals = pd.to_numeric(df_edificio[col], errors="coerce").dropna()
-        if vals.empty or vals.sum() == 0:
-            totales[col] = ""
-        else:
-            s = vals.sum()
-            # entero si toca, o 2 decimales sin ceros sobrantes
-            if abs(s - round(s)) < 1e-6:
-                totales[col] = str(int(round(s)))
-            else:
-                totales[col] = f"{s:.2f}".rstrip("0").rstrip(".")
-    return totales
 
 
 def cerrar_word_procesos():
@@ -209,7 +164,7 @@ def cerrar_word_procesos():
     except Exception as e:
         print(f"   ! Error al cerrar Word: {e}")
 
-    print("   ✓ Sistema listo para generar documentos")
+    print("   * Sistema listo para generar documentos")
 
 
 def get_user_input():
@@ -297,12 +252,7 @@ print("-> Cargando datos del Excel...")
 all_dataframes = load_and_clean_sheets(EXCEL_PATH, SHEET_MAP)
 
 # Asignar a variables individuales
-df_clima = all_dataframes["Clima"]
-df_sist_cc = all_dataframes["SistCC"]
-df_eleva = all_dataframes["Eleva"]
-df_eqhoriz = all_dataframes["EqHoriz"]
-df_ilum = all_dataframes["Ilum"]
-df_otros_eq = all_dataframes["OtrosEq"]
+df_conta = all_dataframes["Conta"]
 
 print("* Datos cargados y limpiados")
 
@@ -387,59 +337,20 @@ edificios_por_seccion = {
 }
 
 edificios_totales = (
-    set(edificios_por_seccion["Clima"])
-    | set(edificios_por_seccion["Eleva"])
-    | set(edificios_por_seccion["SistCC"])
-    | set(edificios_por_seccion["EqHoriz"])
-    | set(edificios_por_seccion["Ilum"])
-    | set(edificios_por_seccion["OtrosEq"])
+    set(edificios_por_seccion["Conta"])
 )
 
 for edificio in sorted(edificios_totales):
-    full_clima = all_dataframes["Clima"]
-    full_sist_cc = all_dataframes["SistCC"]
-    full_eleva = all_dataframes["Eleva"]
-    full_eqhoriz = all_dataframes["EqHoriz"]
-    full_ilum = all_dataframes["Ilum"]
-    full_otros = all_dataframes["OtrosEq"]
 
     # Sub-DataFrames por edificio (sin última fila de totales)
-    df_clima_edificio = full_clima[full_clima["EDIFICIO"] == edificio].iloc[:-1]
-    df_sist_cc_edificio = full_sist_cc[full_sist_cc["EDIFICIO"] == edificio].iloc[:-1]
-    df_eleva_edificio = full_eleva[full_eleva["EDIFICIO"] == edificio].iloc[:-1]
-    df_eqhoriz_edificio = full_eqhoriz[full_eqhoriz["EDIFICIO"] == edificio].iloc[:-1]
-    df_ilum_edificio = full_ilum[full_ilum["EDIFICIO"] == edificio].iloc[:-1]
-    df_otros_eq_edificio = full_otros[full_otros["EDIFICIO"] == edificio].iloc[:-1]
+    df_conta_edificio = df_conta[df_conta["EDIFICIO"] == edificio].iloc[:-1]
 
-    # Calcúlo totales solo en las columnas requeridas
-    totales_clima = get_totales_edificio(full_clima, df_clima_edificio, "Climatización")
-    totales_sist_cc = get_totales_edificio(
-        full_sist_cc, df_sist_cc_edificio, "Calefacción"
-    )
-    totales_eleva = get_totales_edificio(full_eleva, df_eleva_edificio, "Elevadores")
-    totales_eqhoriz = get_totales_edificio(
-        full_eqhoriz, df_eqhoriz_edificio, "H. Horizontales"
-    )
-    totales_ilum = get_totales_edificio(full_ilum, df_ilum_edificio, "Iluminación")
-    totales_otros_eq = get_totales_edificio(
-        full_otros, df_otros_eq_edificio, "Otros Equipos"
-    )
 
     context = {
         "mes": mes_nombre,
         "anio": anio,
-        "df_clima": df_clima_edificio.to_dict("records"),
-        "df_sist_cc": df_sist_cc_edificio.to_dict("records"),
-        "df_eleva": df_eleva_edificio.to_dict("records"),
-        "df_eqhoriz": df_eqhoriz_edificio.to_dict("records"),
-        "df_ilum": df_ilum_edificio.to_dict("records"),
-        "df_otros_eq": df_otros_eq_edificio.to_dict("records"),
-        "totales_clima": [totales_clima],
-        "totales_sist_cc": [totales_sist_cc],
-        "totales_eleva": [totales_eleva],
-        "totales_eqhoriz": [totales_eqhoriz],
-        "totales_ilum": [totales_ilum],
-        "totales_otros_eq": [totales_otros_eq],
+        "df_conta": df_conta_edificio.to_dict("records"),
+        "tipo_de_suministro": df_conta_edificio["SUMINISTRO"].unique()
     }
 
     doc = DocxTemplate(TEMPLATE_DOC)
@@ -448,7 +359,7 @@ for edificio in sorted(edificios_totales):
     try:
         # Crear nombre de archivo limpio
         nombre_edificio = clean_filename(edificio)
-        output_file = f"Anexo 3 {nombre_edificio}.docx"
+        output_file = f"Anexo 2 {nombre_edificio}.docx"
         output_path = BASE_DIR.parent / "word" / "anexos" / output_file
 
         # Guardar el documento

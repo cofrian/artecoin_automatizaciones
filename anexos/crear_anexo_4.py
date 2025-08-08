@@ -15,16 +15,11 @@ EXCEL_PATH = (
     BASE_DIR.parent
     / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1_V20.xlsx"
 )
-TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_3.docx"
-OUTPUT_PATH = BASE_DIR / "ANEXO_3.docx"
+TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_4.docx"
+OUTPUT_PATH = BASE_DIR / "ANEXO_4.docx"
 
 SHEET_MAP = {
-    "Clima": "SISTEMAS DE CLIMATIZACIÓN",
-    "SistCC": "SISTEMAS DE CALEFACCIÓN",
-    "Eleva": "EQUIPOS ELEVADORES",
-    "EqHoriz": "EQUIPOS HORIZONTALES",
-    "Ilum": "SISTEMAS DE ILUMINACIÓN",
-    "OtrosEq": "OTROS EQUIPOS",
+    "Envol": "SISTEMAS CONSTRUCTIVOS",
 }
 
 HEADER_ROW = 0  # primera fila
@@ -85,16 +80,19 @@ def load_and_clean_sheets(xls_path, sheet_map):
                         df_cleaned[col] = df_cleaned[col].round(2)
                 except Exception:
                     pass
-                
-            df_cleaned = df_cleaned.fillna("")
-
+            
+            df_cleaned = df_cleaned.fillna("") 
+            
             result[key] = df_cleaned
 
         return result
 
 
 def clean_filename(filename):
-    """Limpia el nombre del archivo eliminando caracteres no válidos y tildes para Windows."""
+    """
+    Limpia el nombre del archivo eliminando caracteres no válidos
+    y tildes para Windows.
+    """
     # Caracteres no válidos en Windows: < > : " | ? * \ /
     invalid_chars = '<>:"|?*\\/“”'
     cleaned = filename
@@ -297,12 +295,7 @@ print("-> Cargando datos del Excel...")
 all_dataframes = load_and_clean_sheets(EXCEL_PATH, SHEET_MAP)
 
 # Asignar a variables individuales
-df_clima = all_dataframes["Clima"]
-df_sist_cc = all_dataframes["SistCC"]
-df_eleva = all_dataframes["Eleva"]
-df_eqhoriz = all_dataframes["EqHoriz"]
-df_ilum = all_dataframes["Ilum"]
-df_otros_eq = all_dataframes["OtrosEq"]
+df_envol = all_dataframes["Envol"]
 
 print("* Datos cargados y limpiados")
 
@@ -387,59 +380,22 @@ edificios_por_seccion = {
 }
 
 edificios_totales = (
-    set(edificios_por_seccion["Clima"])
-    | set(edificios_por_seccion["Eleva"])
-    | set(edificios_por_seccion["SistCC"])
-    | set(edificios_por_seccion["EqHoriz"])
-    | set(edificios_por_seccion["Ilum"])
-    | set(edificios_por_seccion["OtrosEq"])
+    set(edificios_por_seccion["Envol"])
 )
 
 for edificio in sorted(edificios_totales):
-    full_clima = all_dataframes["Clima"]
-    full_sist_cc = all_dataframes["SistCC"]
-    full_eleva = all_dataframes["Eleva"]
-    full_eqhoriz = all_dataframes["EqHoriz"]
-    full_ilum = all_dataframes["Ilum"]
-    full_otros = all_dataframes["OtrosEq"]
 
     # Sub-DataFrames por edificio (sin última fila de totales)
-    df_clima_edificio = full_clima[full_clima["EDIFICIO"] == edificio].iloc[:-1]
-    df_sist_cc_edificio = full_sist_cc[full_sist_cc["EDIFICIO"] == edificio].iloc[:-1]
-    df_eleva_edificio = full_eleva[full_eleva["EDIFICIO"] == edificio].iloc[:-1]
-    df_eqhoriz_edificio = full_eqhoriz[full_eqhoriz["EDIFICIO"] == edificio].iloc[:-1]
-    df_ilum_edificio = full_ilum[full_ilum["EDIFICIO"] == edificio].iloc[:-1]
-    df_otros_eq_edificio = full_otros[full_otros["EDIFICIO"] == edificio].iloc[:-1]
+    df_envol_edificio = df_envol[df_envol["EDIFICIO"] == edificio].iloc[:-1]
 
     # Calcúlo totales solo en las columnas requeridas
-    totales_clima = get_totales_edificio(full_clima, df_clima_edificio, "Climatización")
-    totales_sist_cc = get_totales_edificio(
-        full_sist_cc, df_sist_cc_edificio, "Calefacción"
-    )
-    totales_eleva = get_totales_edificio(full_eleva, df_eleva_edificio, "Elevadores")
-    totales_eqhoriz = get_totales_edificio(
-        full_eqhoriz, df_eqhoriz_edificio, "H. Horizontales"
-    )
-    totales_ilum = get_totales_edificio(full_ilum, df_ilum_edificio, "Iluminación")
-    totales_otros_eq = get_totales_edificio(
-        full_otros, df_otros_eq_edificio, "Otros Equipos"
-    )
+    totales_envol = get_totales_edificio(df_envol, df_envol_edificio, "Climatización")
 
     context = {
         "mes": mes_nombre,
         "anio": anio,
-        "df_clima": df_clima_edificio.to_dict("records"),
-        "df_sist_cc": df_sist_cc_edificio.to_dict("records"),
-        "df_eleva": df_eleva_edificio.to_dict("records"),
-        "df_eqhoriz": df_eqhoriz_edificio.to_dict("records"),
-        "df_ilum": df_ilum_edificio.to_dict("records"),
-        "df_otros_eq": df_otros_eq_edificio.to_dict("records"),
-        "totales_clima": [totales_clima],
-        "totales_sist_cc": [totales_sist_cc],
-        "totales_eleva": [totales_eleva],
-        "totales_eqhoriz": [totales_eqhoriz],
-        "totales_ilum": [totales_ilum],
-        "totales_otros_eq": [totales_otros_eq],
+        "df_envol": df_envol_edificio.to_dict("records"),
+        "totales_envol": [totales_envol],
     }
 
     doc = DocxTemplate(TEMPLATE_DOC)
@@ -448,7 +404,7 @@ for edificio in sorted(edificios_totales):
     try:
         # Crear nombre de archivo limpio
         nombre_edificio = clean_filename(edificio)
-        output_file = f"Anexo 3 {nombre_edificio}.docx"
+        output_file = f"Anexo 4 {nombre_edificio}.docx"
         output_path = BASE_DIR.parent / "word" / "anexos" / output_file
 
         # Guardar el documento
