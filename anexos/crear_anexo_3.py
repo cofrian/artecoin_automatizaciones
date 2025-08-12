@@ -45,13 +45,14 @@ SHEET_MAP = {
 
 HEADER_ROW = 0  # primera fila
 SKIP_ROWS = None
+GROUP_COLUMN = "CENTRO"  # Columna utilizada para agrupar y generar anexos
 
 # --------------------------------------------------------------------
 # 2) LIMPIEZA DE DATAFRAMES -------------------------------------------
 # --------------------------------------------------------------------
 
 
-def delete_rows_optimized(df, columna="ID CENTRO"):
+def delete_rows_optimized(df, columna="ID EDIFICIO"):
     """Elimina las filas vacías al final del DataFrame."""
     if columna in df.columns:
         # Encontrar la última fila con datos válidos
@@ -63,7 +64,9 @@ def delete_rows_optimized(df, columna="ID CENTRO"):
 
 
 def clean_last_row(df):
-    """Limpia la última fila de totales."""
+    """
+    Limpia la última fila, que se corresponde con la de totales
+    """
     if df.empty:
         return df
     df2 = df.copy()
@@ -101,13 +104,12 @@ def load_and_clean_sheets(xls_path, sheet_map):
                         df_cleaned[col] = df_cleaned[col].round(2)
                 except Exception:
                     pass
-                
+
             df_cleaned = df_cleaned.fillna("")
 
             result[key] = df_cleaned
 
         return result
-
 
 
 def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
@@ -133,8 +135,11 @@ def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
                 continue
             try:
                 doc = word_app.Documents.Open(
-                    doc_path, ConfirmConversions=False, ReadOnly=False,
-                    AddToRecentFiles=False, Visible=False,
+                    doc_path,
+                    ConfirmConversions=False,
+                    ReadOnly=False,
+                    AddToRecentFiles=False,
+                    Visible=False,
                 )
             except Exception as e:
                 print(f"   ! No se pudo abrir: {doc_path} -> {e}")
@@ -148,7 +153,11 @@ def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
                         try:
                             fld = doc.Fields(i)
                             t = fld.Type
-                            if t in (constants.wdFieldTOC, constants.wdFieldIndex, constants.wdFieldTOA):
+                            if t in (
+                                constants.wdFieldTOC,
+                                constants.wdFieldIndex,
+                                constants.wdFieldTOA,
+                            ):
                                 continue
                             fld.Update()
                         except Exception:
@@ -208,14 +217,18 @@ def clean_filename(filename):
     return cleaned
 
 
-def get_totales_edificio(
-    df_full: pd.DataFrame, df_edificio: pd.DataFrame, nombre_seccion: str
+def get_totales_centro(
+    df_full: pd.DataFrame, df_grupo: pd.DataFrame, nombre_seccion: str
 ) -> dict[str, str]:
+    """Calcula totales por grupo (antes edificio) usando la última fila como referencia.
+
+    df_full: DataFrame completo (incluye fila final con totales globales precalculados).
+    df_grupo: Subconjunto filtrado para un valor concreto de GROUP_COLUMN.
+    nombre_seccion: No se usa actualmente pero se mantiene por compatibilidad/futuras mejoras.
     """
-    - df_full: DataFrame completo (incluye última fila de totales pre-calculados).
-    - df_edificio: Sólo las filas de este edificio (sin fila de totales).
-    """
-    # 1) Detectar columnas que **requieren** un total:
+    if df_full.empty:
+        return {}
+
     ultima_full = df_full.iloc[-1]
     cols_a_sumar = [
         col
@@ -223,17 +236,16 @@ def get_totales_edificio(
         if pd.notna(ultima_full[col]) and str(ultima_full[col]).strip() != ""
     ]
 
-    # 2) Construir dict inicial con EDIFICIO
-    totales: dict[str, str] = {"EDIFICIO": "Total general"}
+    # Clave descriptiva; si la plantilla aún espera 'EDIFICIO' la mantenemos.
+    key_label = "EDIFICIO" if "EDIFICIO" in df_full.columns else GROUP_COLUMN
+    totales: dict[str, str] = {key_label: "Total general"}
 
-    # 3) Para cada columna que pide total, sumamos df_edificio[col]
     for col in cols_a_sumar:
-        vals = pd.to_numeric(df_edificio[col], errors="coerce").dropna()
+        vals = pd.to_numeric(df_grupo[col], errors="coerce").dropna()
         if vals.empty or vals.sum() == 0:
             totales[col] = ""
         else:
             s = vals.sum()
-            # entero si toca, o 2 decimales sin ceros sobrantes
             if abs(s - round(s)) < 1e-6:
                 totales[col] = str(int(round(s)))
             else:
@@ -253,7 +265,9 @@ def cerrar_word_procesos():
                 try:
                     word_app = win32_client.GetActiveObject("Word.Application")
                     if word_app.Documents.Count > 0:
-                        print(f"   Cerrando {word_app.Documents.Count} documentos abiertos...")
+                        print(
+                            f"   Cerrando {word_app.Documents.Count} documentos abiertos..."
+                        )
                         for doc in word_app.Documents:
                             doc.Close(SaveChanges=False)
                     word_app.Quit()
@@ -350,7 +364,9 @@ def get_user_input():
             if current_year - 5 <= anio <= current_year + 5:  # Rango razonable de años
                 break
             else:
-                print(f"Error: El año debe estar entre {current_year - 5} y {current_year + 5}")
+                print(
+                    f"Error: El año debe estar entre {current_year - 5} y {current_year + 5}"
+                )
         except ValueError:
             print("Error: Por favor ingrese un año válido")
 
@@ -363,31 +379,195 @@ def get_user_input():
 
 
 # Obtener datos del usuario
-mes_nombre, anio = get_user_input()
+def create_anex(
+    BASE_DIR,
+    EXCEL_PATH,
+    TEMPLATE_BYTES,
+    SHEET_MAP,
+    load_and_clean_sheets,
+    update_word_fields_bulk,
+    clean_filename,
+    get_totales_centro,
+    cerrar_word_procesos,
+    get_user_input,
+):
+    mes_nombre, anio = get_user_input()
 
-# NUEVO: Cerrar todos los procesos de Word antes de empezar
-cerrar_word_procesos()
+    # NUEVO: Cerrar todos los procesos de Word antes de empezar
+    cerrar_word_procesos()
 
-# Cargar y limpiar datos
-print("-> Cargando datos del Excel...")
-all_dataframes = load_and_clean_sheets(EXCEL_PATH, SHEET_MAP)
+    # Cargar y limpiar datos
+    print("-> Cargando datos del Excel...")
+    all_dataframes = load_and_clean_sheets(EXCEL_PATH, SHEET_MAP)
 
-# Asignar a variables individuales
-df_clima = all_dataframes["Clima"]
-df_sist_cc = all_dataframes["SistCC"]
-df_eleva = all_dataframes["Eleva"]
-df_eqhoriz = all_dataframes["EqHoriz"]
-df_ilum = all_dataframes["Ilum"]
-df_otros_eq = all_dataframes["OtrosEq"]
+    print("* Datos cargados y limpiados")
 
-print("* Datos cargados y limpiados")
+    # Crear contexto para la plantilla
+    print("-> Renderizando documentos...")
+
+    generated_docs = []
+
+    # Verificar existencia de la columna de agrupación en al menos una hoja
+    hojas_con_grupo = [
+        k for k, df in all_dataframes.items() if GROUP_COLUMN in df.columns
+    ]
+    if not hojas_con_grupo:
+        print(
+            f"   ! No se encontró la columna '{GROUP_COLUMN}' en ninguna hoja. Se detiene el proceso."
+        )
+        return
+
+    # Obtener el conjunto total de grupos presentes en cualquier hoja
+    grupos_totales: set[str] = set()
+    for df in all_dataframes.values():
+        if GROUP_COLUMN in df.columns:
+            grupos_totales.update(df[GROUP_COLUMN].dropna().unique().tolist())
+
+    # Remover posibles valores vacíos
+    grupos_totales = {c for c in grupos_totales if str(c).strip() not in ("", "nan")}
+
+    if not grupos_totales:
+        print(f"   ! No hay valores de {GROUP_COLUMN} válidos para procesar.")
+        return
+
+    print(
+        f"-> Se generarán documentos para {len(grupos_totales)} {GROUP_COLUMN.lower()}s"
+    )
+
+    for centro in sorted(grupos_totales):
+        full_clima = all_dataframes["Clima"]
+        full_sist_cc = all_dataframes["SistCC"]
+        full_eleva = all_dataframes["Eleva"]
+        full_eqhoriz = all_dataframes["EqHoriz"]
+        full_ilum = all_dataframes["Ilum"]
+        full_otros = all_dataframes["OtrosEq"]
+
+        # Filtrar por centro (las filas totales globales no suelen tener CENTRO, por lo que no se incluyen)
+        df_clima_centro = full_clima[full_clima.get(GROUP_COLUMN) == centro].copy()
+        df_sist_cc_centro = full_sist_cc[
+            full_sist_cc.get(GROUP_COLUMN) == centro
+        ].copy()
+        df_eleva_centro = full_eleva[full_eleva.get(GROUP_COLUMN) == centro].copy()
+        df_eqhoriz_centro = full_eqhoriz[
+            full_eqhoriz.get(GROUP_COLUMN) == centro
+        ].copy()
+        df_ilum_centro = full_ilum[full_ilum.get(GROUP_COLUMN) == centro].copy()
+        df_otros_eq_centro = full_otros[full_otros.get(GROUP_COLUMN) == centro].copy()
+
+        # Saltar si todas las tablas están vacías para este centro
+        if all(
+            len(df_) == 0
+            for df_ in [
+                df_clima_centro,
+                df_sist_cc_centro,
+                df_eleva_centro,
+                df_eqhoriz_centro,
+                df_ilum_centro,
+                df_otros_eq_centro,
+            ]
+        ):
+            continue
+
+        # Calcular totales (reutilizamos función existente). Etiquetamos para indicar centro.
+        totales_clima = get_totales_centro(full_clima, df_clima_centro, "Climatización")
+        totales_sist_cc = get_totales_centro(
+            full_sist_cc, df_sist_cc_centro, "Calefacción"
+        )
+        totales_eleva = get_totales_centro(full_eleva, df_eleva_centro, "Elevadores")
+        totales_eqhoriz = get_totales_centro(
+            full_eqhoriz, df_eqhoriz_centro, "H. Horizontales"
+        )
+        totales_ilum = get_totales_centro(full_ilum, df_ilum_centro, "Iluminación")
+        totales_otros_eq = get_totales_centro(
+            full_otros, df_otros_eq_centro, "Otros Equipos"
+        )
+
+        # Ajustar etiqueta de la primera columna para reflejar el centro
+        # Etiquetar la clave descriptiva utilizada en totales (EDIFICIO o GROUP_COLUMN)
+        label_key = "EDIFICIO" if "EDIFICIO" in full_clima.columns else GROUP_COLUMN
+        for tot in [
+            totales_clima,
+            totales_sist_cc,
+            totales_eleva,
+            totales_eqhoriz,
+            totales_ilum,
+            totales_otros_eq,
+        ]:
+            if label_key in tot:
+                tot[label_key] = f"Total {centro}"
+
+        context = {
+            "mes": mes_nombre,
+            "anio": anio,
+            "centro": centro,
+            "df_clima": df_clima_centro.to_dict("records"),
+            "df_sist_cc": df_sist_cc_centro.to_dict("records"),
+            "df_eleva": df_eleva_centro.to_dict("records"),
+            "df_eqhoriz": df_eqhoriz_centro.to_dict("records"),
+            "df_ilum": df_ilum_centro.to_dict("records"),
+            "df_otros_eq": df_otros_eq_centro.to_dict("records"),
+            "totales_clima": [totales_clima],
+            "totales_sist_cc": [totales_sist_cc],
+            "totales_eleva": [totales_eleva],
+            "totales_eqhoriz": [totales_eqhoriz],
+            "totales_ilum": [totales_ilum],
+            "totales_otros_eq": [totales_otros_eq],
+        }
+
+        doc = DocxTemplate(BytesIO(TEMPLATE_BYTES))
+        doc.render(context)
+
+        try:
+            nombre_centro = clean_filename(str(centro))
+            output_file = f"Anexo 3 {nombre_centro}.docx"
+            output_path = BASE_DIR.parent / "word" / "anexos" / output_file
+            doc.save(str(output_path))
+            print(f"* Documento generado: {output_file}")
+            generated_docs.append(str(output_path))
+        except PermissionError as e:
+            print(f"   ! Error de permisos con {output_file}: {e}")
+            print("   ! Saltando este archivo...")
+            continue
+        except Exception as e:
+            print(f"   ! Error inesperado con {output_file}: {e}")
+            continue
+
+    print("\nActualizando campos en lote (TOC: solo paginación)...")
+    update_word_fields_bulk(generated_docs, toc_mode="pn")
+    print("\nTodos los documentos generados correctamente.")
+
+    # Mensaje final sobre archivos generados
+    print(f"\n{'=' * 60}")
+    print("PROCESO COMPLETADO")
+    print(f"{'=' * 60}")
+    print("Los documentos se encuentran en:")
+    print(f"  {BASE_DIR.parent / 'word' / 'anexos'}")
+    print("\nSi algún archivo no se generó debido a errores de permisos,")
+    print("cierra Word completamente y vuelve a ejecutar el script.")
+    print(f"{'=' * 60}")
+
+
+create_anex(
+    BASE_DIR,
+    EXCEL_PATH,
+    TEMPLATE_BYTES,
+    SHEET_MAP,
+    load_and_clean_sheets,
+    update_word_fields_bulk,
+    clean_filename,
+    get_totales_centro,
+    cerrar_word_procesos,
+    get_user_input,
+)
 
 
 # Crear documento Word
 def update_word_fields(doc_path):
     """Actualiza los campos del documento Word."""
     if win32_client is None or pythoncom is None:
-        print("   ! Para actualizar automáticamente el índice, instala: pip install pywin32")
+        print(
+            "   ! Para actualizar automáticamente el índice, instala: pip install pywin32"
+        )
         return
 
     try:
@@ -436,105 +616,6 @@ def update_word_fields(doc_path):
             pythoncom.CoUninitialize()
     except Exception as e:
         print(f"   ! Error general al actualizar índice: {e}")
-        print("   * El documento se generó correctamente, solo falló la actualización del índice")
-
-
-# Crear contexto para la plantilla
-print("-> Renderizando documentos...")
-
-generated_docs = []
-edificios_por_seccion = {
-    key: df["EDIFICIO"].unique()[:-1] for key, df in all_dataframes.items()
-}
-
-edificios_totales = (
-    set(edificios_por_seccion["Clima"])
-    | set(edificios_por_seccion["Eleva"])
-    | set(edificios_por_seccion["SistCC"])
-    | set(edificios_por_seccion["EqHoriz"])
-    | set(edificios_por_seccion["Ilum"])
-    | set(edificios_por_seccion["OtrosEq"])
-)
-
-for edificio in sorted(edificios_totales):
-    full_clima = all_dataframes["Clima"]
-    full_sist_cc = all_dataframes["SistCC"]
-    full_eleva = all_dataframes["Eleva"]
-    full_eqhoriz = all_dataframes["EqHoriz"]
-    full_ilum = all_dataframes["Ilum"]
-    full_otros = all_dataframes["OtrosEq"]
-
-    # Sub-DataFrames por edificio (sin última fila de totales)
-    df_clima_edificio = full_clima[full_clima["EDIFICIO"] == edificio].iloc[:-1]
-    df_sist_cc_edificio = full_sist_cc[full_sist_cc["EDIFICIO"] == edificio].iloc[:-1]
-    df_eleva_edificio = full_eleva[full_eleva["EDIFICIO"] == edificio].iloc[:-1]
-    df_eqhoriz_edificio = full_eqhoriz[full_eqhoriz["EDIFICIO"] == edificio].iloc[:-1]
-    df_ilum_edificio = full_ilum[full_ilum["EDIFICIO"] == edificio].iloc[:-1]
-    df_otros_eq_edificio = full_otros[full_otros["EDIFICIO"] == edificio].iloc[:-1]
-
-    # Calcúlo totales solo en las columnas requeridas
-    totales_clima = get_totales_edificio(full_clima, df_clima_edificio, "Climatización")
-    totales_sist_cc = get_totales_edificio(
-        full_sist_cc, df_sist_cc_edificio, "Calefacción"
-    )
-    totales_eleva = get_totales_edificio(full_eleva, df_eleva_edificio, "Elevadores")
-    totales_eqhoriz = get_totales_edificio(
-        full_eqhoriz, df_eqhoriz_edificio, "H. Horizontales"
-    )
-    totales_ilum = get_totales_edificio(full_ilum, df_ilum_edificio, "Iluminación")
-    totales_otros_eq = get_totales_edificio(
-        full_otros, df_otros_eq_edificio, "Otros Equipos"
-    )
-
-    context = {
-        "mes": mes_nombre,
-        "anio": anio,
-        "df_clima": df_clima_edificio.to_dict("records"),
-        "df_sist_cc": df_sist_cc_edificio.to_dict("records"),
-        "df_eleva": df_eleva_edificio.to_dict("records"),
-        "df_eqhoriz": df_eqhoriz_edificio.to_dict("records"),
-        "df_ilum": df_ilum_edificio.to_dict("records"),
-        "df_otros_eq": df_otros_eq_edificio.to_dict("records"),
-        "totales_clima": [totales_clima],
-        "totales_sist_cc": [totales_sist_cc],
-        "totales_eleva": [totales_eleva],
-        "totales_eqhoriz": [totales_eqhoriz],
-        "totales_ilum": [totales_ilum],
-        "totales_otros_eq": [totales_otros_eq],
-    }
-
-    doc = DocxTemplate(BytesIO(TEMPLATE_BYTES))
-    doc.render(context)
-
-    try:
-        # Crear nombre de archivo limpio
-        nombre_edificio = clean_filename(edificio)
-        output_file = f"Anexo 3 {nombre_edificio}.docx"
-        output_path = BASE_DIR.parent / "word" / "anexos" / output_file
-
-        # Guardar el documento
-        doc.save(str(output_path))
-        print(f"* Documento generado: {output_file}")
-
-        generated_docs.append(str(output_path))
-    except PermissionError as e:
-        print(f"   ! Error de permisos con {output_file}: {e}")
-        print("   ! Saltando este archivo...")
-        continue
-    except Exception as e:
-        print(f"   ! Error inesperado con {output_file}: {e}")
-        continue
-
-print("\nActualizando campos en lote (TOC: solo paginación)...")
-update_word_fields_bulk(generated_docs, toc_mode="pn")
-print("\nTodos los documentos generados correctamente.")
-
-# Mensaje final sobre archivos generados
-print(f"\n{'=' * 60}")
-print("PROCESO COMPLETADO")
-print(f"{'=' * 60}")
-print("Los documentos se encuentran en:")
-print(f"  {BASE_DIR.parent / 'word' / 'anexos'}")
-print("\nSi algún archivo no se generó debido a errores de permisos,")
-print("cierra Word completamente y vuelve a ejecutar el script.")
-print(f"{'=' * 60}")
+        print(
+            "   * El documento se generó correctamente, solo falló la actualización del índice"
+        )

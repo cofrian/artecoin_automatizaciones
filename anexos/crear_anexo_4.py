@@ -16,6 +16,7 @@ try:
     import win32com.client as win32_client
     from win32com.client import constants as win32_constants
     import pythoncom
+
     HAS_PYWIN32 = True
 except ImportError:
     win32_client = None
@@ -41,6 +42,7 @@ SHEET_MAP = {
 
 HEADER_ROW = 0  # primera fila
 SKIP_ROWS = None
+GROUP_COLUMN = "CENTRO"  # Columna de agrupación para generar anexos
 
 # --------------------------------------------------------------------
 # 2) LIMPIEZA DE DATAFRAMES -------------------------------------------
@@ -97,9 +99,9 @@ def load_and_clean_sheets(xls_path, sheet_map):
                         df_cleaned[col] = df_cleaned[col].round(2)
                 except Exception:
                     pass
-            
-            df_cleaned = df_cleaned.fillna("") 
-            
+
+            df_cleaned = df_cleaned.fillna("")
+
             result[key] = df_cleaned
 
         return result
@@ -131,14 +133,18 @@ def clean_filename(filename):
     return cleaned
 
 
-def get_totales_edificio(
-    df_full: pd.DataFrame, df_edificio: pd.DataFrame, nombre_seccion: str
+def get_totales_centro(
+    df_full: pd.DataFrame, df_grupo: pd.DataFrame, nombre_seccion: str
 ) -> dict[str, str]:
+    """Calcula totales por grupo (antes 'edificio'), usando la última fila como referencia.
+
+    df_full: DataFrame completo (incluye fila final con totales globales precalculados).
+    df_grupo: Subconjunto filtrado para un valor concreto de GROUP_COLUMN.
+    nombre_seccion: Reservado para posibles usos futuros.
     """
-    - df_full: DataFrame completo (incluye última fila de totales pre-calculados).
-    - df_edificio: Sólo las filas de este edificio (sin fila de totales).
-    """
-    # 1) Detectar columnas que **requieren** un total:
+    if df_full.empty:
+        return {}
+
     ultima_full = df_full.iloc[-1]
     cols_a_sumar = [
         col
@@ -146,17 +152,15 @@ def get_totales_edificio(
         if pd.notna(ultima_full[col]) and str(ultima_full[col]).strip() != ""
     ]
 
-    # 2) Construir dict inicial con EDIFICIO
-    totales: dict[str, str] = {"EDIFICIO": "Total general"}
+    key_label = "EDIFICIO" if "EDIFICIO" in df_full.columns else GROUP_COLUMN
+    totales: dict[str, str] = {key_label: "Total general"}
 
-    # 3) Para cada columna que pide total, sumamos df_edificio[col]
     for col in cols_a_sumar:
-        vals = pd.to_numeric(df_edificio[col], errors="coerce").dropna()
+        vals = pd.to_numeric(df_grupo[col], errors="coerce").dropna()
         if vals.empty or vals.sum() == 0:
             totales[col] = ""
         else:
             s = vals.sum()
-            # entero si toca, o 2 decimales sin ceros sobrantes
             if abs(s - round(s)) < 1e-6:
                 totales[col] = str(int(round(s)))
             else:
@@ -180,7 +184,9 @@ def cerrar_word_procesos():
 
                 if word_app is not None:
                     if word_app.Documents.Count > 0:
-                        print(f"   Cerrando {word_app.Documents.Count} documentos abiertos...")
+                        print(
+                            f"   Cerrando {word_app.Documents.Count} documentos abiertos..."
+                        )
                         for doc in list(word_app.Documents):
                             try:
                                 doc.Close(SaveChanges=False)
@@ -383,26 +389,33 @@ print("* Datos cargados y limpiados")
 
 # Crear contexto para la plantilla
 print("-> Renderizando documentos...")
-edificios_por_seccion = {
-    key: df["EDIFICIO"].unique()[:-1] for key, df in all_dataframes.items()
-}
 
-edificios_totales = (
-    set(edificios_por_seccion["Envol"])
-)
+centros = []
+if GROUP_COLUMN in df_envol.columns:
+    df_envol_filtrado = df_envol.copy()
+    # Remover posibles filas totales (asumimos última si GROUP_COLUMN vacío)
+    df_envol_filtrado = df_envol_filtrado[
+        df_envol_filtrado[GROUP_COLUMN].notna()
+        & (df_envol_filtrado[GROUP_COLUMN].astype(str).str.strip() != "")
+    ]
+    centros = sorted(df_envol_filtrado[GROUP_COLUMN].unique())
+else:
+    print(f"   ! No se encontró la columna {GROUP_COLUMN} en la hoja Envol")
 
-for edificio in sorted(edificios_totales):
+for centro in centros:
+    df_envol_centro = df_envol[df_envol[GROUP_COLUMN] == centro].copy()
+    totales_envol = get_totales_centro(df_envol, df_envol_centro, "Envolvente")
 
-    # Sub-DataFrames por edificio (sin última fila de totales)
-    df_envol_edificio = df_envol[df_envol["EDIFICIO"] == edificio].iloc[:-1]
-
-    # Calcúlo totales solo en las columnas requeridas
-    totales_envol = get_totales_edificio(df_envol, df_envol_edificio, "Climatización")
+    # Ajustar etiqueta de la primera columna en totales si corresponde
+    label_key = "EDIFICIO" if "EDIFICIO" in df_envol.columns else GROUP_COLUMN
+    if label_key in totales_envol:
+        totales_envol[label_key] = f"Total {centro}"
 
     context = {
         "mes": mes_nombre,
         "anio": anio,
-        "df_envol": df_envol_edificio.to_dict("records"),
+        "centro": centro,
+        "df_envol": df_envol_centro.to_dict("records"),
         "totales_envol": [totales_envol],
     }
 
@@ -410,18 +423,11 @@ for edificio in sorted(edificios_totales):
     doc.render(context)
 
     try:
-        # Crear nombre de archivo limpio
-        nombre_edificio = clean_filename(edificio)
-        output_file = f"Anexo 4 {nombre_edificio}.docx"
+        nombre_centro = clean_filename(centro)
+        output_file = f"Anexo 4 {nombre_centro}.docx"
         output_path = BASE_DIR.parent / "word" / "anexos" / output_file
-
-        # Guardar el documento
         doc.save(str(output_path))
         print(f"* Documento generado: {output_file}")
-
-        # Actualizar campos
-        # update_word_fields(str(output_path))
-
     except PermissionError as e:
         print(f"   ! Error de permisos con {output_file}: {e}")
         print("   ! Saltando este archivo...")

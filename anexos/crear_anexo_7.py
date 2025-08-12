@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import tempfile
+import shutil
 from typing import List, Tuple
+
 # from datetime import datetime
 import unicodedata
 import subprocess
@@ -16,7 +19,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Silenciar avisos verbosos de pypdf (duplicados /PageMode, etc.)
 import logging
-logging.getLogger('pypdf').setLevel(logging.ERROR)
+
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 """
 Crear Anexo 7
 -------------
@@ -183,7 +187,6 @@ def word_to_pdf(docx_path: Path, pdf_out_path: Path) -> None:
         pythoncom.CoUninitialize()
 
 
-
 def find_certificates(edificio_dir: Path) -> List[Tuple[int, Path]]:
     """
     Busca PDFs de PLANOS en la carpeta del edificio **y subcarpetas**.
@@ -215,13 +218,13 @@ def find_certificates(edificio_dir: Path) -> List[Tuple[int, Path]]:
     return certs
 
 
-
 def merge_pdfs_fast(output_pdf: Path, pdf_paths: List[Path]) -> None:
     """
     Une PDFs prefiriendo pikepdf (rápido/robusto). Si no está disponible, usa pypdf (PdfWriter).
     """
     try:
         import pikepdf  # type: ignore
+
         with pikepdf.Pdf.new() as dst:
             for p in pdf_paths:
                 with pikepdf.open(str(p)) as src:
@@ -232,17 +235,52 @@ def merge_pdfs_fast(output_pdf: Path, pdf_paths: List[Path]) -> None:
     except Exception:
         merge_pdfs(output_pdf, pdf_paths)
 
+
+def _qpdf_sanitize(src: Path, dst: Path) -> bool:
+    """Intenta reescribir un PDF con qpdf para sanear diccionarios duplicados (como /PageMode)."""
+    try:
+        result = subprocess.run(
+            ["qpdf", "--linearize", str(src), str(dst)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return dst.exists() and result.returncode == 0
+    except Exception:
+        return False
+
+
 def merge_pdfs(output_pdf: Path, pdf_paths: List[Path]) -> None:
-    """Une varios PDFs en uno solo usando pypdf >= 5 (PdfWriter)."""
-    writer = PdfWriter()
-    for p in pdf_paths:
-        writer.append(str(p))
-    output_pdf.parent.mkdir(parents=True, exist_ok=True)
-    with output_pdf.open("wb") as f:
-        writer.write(f)
+    """Une varios PDFs en uno solo usando pypdf >= 5 (PdfWriter) con saneado previo vía qpdf si está disponible."""
+    # Preparar carpeta temporal para PDFs saneados
+    tmp_dir = Path(tempfile.mkdtemp(prefix="sanpdf_"))
+    sanitized_paths: List[Path] = []
+    try:
+        for p in pdf_paths:
+            # Intentar sanear cada entrada con qpdf; si falla, usar original
+            dst = tmp_dir / p.name
+            if _qpdf_sanitize(p, dst):
+                sanitized_paths.append(dst)
+            else:
+                sanitized_paths.append(p)
+
+        writer = PdfWriter()
+        for sp in sanitized_paths:
+            writer.append(str(sp))
+        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        with output_pdf.open("wb") as f:
+            writer.write(f)
+    finally:
+        # Limpiar temporales
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
-def _worker_procesar_edificio(edificio_dir_str: str, plantilla_pdf_str: str, output_dir_str: str) -> tuple[str, bool, str]:
+def _worker_procesar_edificio(
+    edificio_dir_str: str, plantilla_pdf_str: str, output_dir_str: str
+) -> tuple[str, bool, str]:
     try:
         edificio_dir = Path(edificio_dir_str)
         plantilla_pdf = Path(plantilla_pdf_str)
@@ -310,7 +348,6 @@ def _worker_procesar_edificio(edificio_dir_str: str, plantilla_pdf_str: str, out
 #     return mes_nombre, anio
 
 
-
 def main():
     print("=== Generador de Anexo 7 ===")
     cerrar_word_procesos()
@@ -320,7 +357,10 @@ def main():
         print("No existe la carpeta de edificios indicada.")
         return
 
-    edificios = sorted([d for d in BUILDINGS_ROOT.iterdir() if d.is_dir()], key=lambda p: p.name.lower())
+    edificios = sorted(
+        [d for d in BUILDINGS_ROOT.iterdir() if d.is_dir()],
+        key=lambda p: p.name.lower(),
+    )
     if not edificios:
         print("No se encontraron carpetas de edificios.")
         return
@@ -340,7 +380,15 @@ def main():
     resultados = []
 
     with ProcessPoolExecutor() as ex:
-        futs = {ex.submit(_worker_procesar_edificio, str(ed), str(plantilla_pdf_compartida), str(OUTPUT_DIR)): ed for ed in edificios}
+        futs = {
+            ex.submit(
+                _worker_procesar_edificio,
+                str(ed),
+                str(plantilla_pdf_compartida),
+                str(OUTPUT_DIR),
+            ): ed
+            for ed in edificios
+        }
         for fut in as_completed(futs):
             edificio = futs[fut]
             try:
@@ -366,6 +414,7 @@ def main():
         for c in carpetas_sin_planos:
             print(f"   - {c}")
     print(f"Archivos en: {OUTPUT_DIR}")
+
 
 if __name__ == "__main__":
     main()
