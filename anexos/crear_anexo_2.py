@@ -4,12 +4,15 @@ from pathlib import Path
 import pandas as pd
 from docxtpl import DocxTemplate
 from datetime import datetime
+import unicodedata
+import re
 
 # Hacer opcional pywin32 para actualización de campos en Word
 try:
     import win32com.client
     import pythoncom
     from win32com.client import constants
+
     win32_available = True
 except Exception:
     win32com = None
@@ -26,17 +29,14 @@ from io import BytesIO
 BASE_DIR = Path(__file__).resolve().parent
 
 EXCEL_PATH = (
-    BASE_DIR.parent
-    / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1_V20.xlsx"
+    BASE_DIR.parent / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1.xlsx"
 )
 TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_2.docx"
 # Cachear la plantilla en memoria para reuso (más rápido que leer de disco cada vez)
 TEMPLATE_BYTES = Path(TEMPLATE_DOC).read_bytes()
 OUTPUT_PATH = BASE_DIR / "ANEXO_3.docx"
 
-SHEET_MAP = {
-    "Conta": "Conta"
-}
+SHEET_MAP = {"Conta": "Conta"}
 
 HEADER_ROW = 0  # primera fila
 SKIP_ROWS = None
@@ -86,13 +86,12 @@ def load_and_clean_sheets(xls_path, sheet_map):
                         df_cleaned[col] = df_cleaned[col].round(2)
                 except Exception:
                     pass
-            
+
             df_cleaned = df_cleaned.fillna("")
 
             result[key] = df_cleaned
 
         return result
-
 
 
 def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
@@ -118,8 +117,11 @@ def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
                 continue
             try:
                 doc = word_app.Documents.Open(
-                    doc_path, ConfirmConversions=False, ReadOnly=False,
-                    AddToRecentFiles=False, Visible=False,
+                    doc_path,
+                    ConfirmConversions=False,
+                    ReadOnly=False,
+                    AddToRecentFiles=False,
+                    Visible=False,
                 )
             except Exception as e:
                 print(f"   ! No se pudo abrir: {doc_path} -> {e}")
@@ -133,7 +135,11 @@ def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
                         try:
                             fld = doc.Fields(i)
                             t = fld.Type
-                            if t in (constants.wdFieldTOC, constants.wdFieldIndex, constants.wdFieldTOA):
+                            if t in (
+                                constants.wdFieldTOC,
+                                constants.wdFieldIndex,
+                                constants.wdFieldTOA,
+                            ):
                                 continue
                             fld.Update()
                         except Exception:
@@ -170,10 +176,7 @@ def update_word_fields_bulk(doc_paths: list[str], toc_mode: str = "pn"):
 
 
 def clean_filename(filename):
-    """
-    Limpia el nombre del archivo eliminando caracteres no válidos
-    y tildes para Windows.
-    """
+    """Limpia el nombre del archivo eliminando caracteres no válidos y tildes para Windows."""
     # Caracteres no válidos en Windows: < > : " | ? * \ /
     invalid_chars = '<>:"|?*\\/“”'
     cleaned = filename
@@ -183,14 +186,10 @@ def clean_filename(filename):
         cleaned = cleaned.replace(char, "")
 
     # Reemplazar letras con tilde por su versión sin tilde
-    import unicodedata
-
     cleaned = unicodedata.normalize("NFD", cleaned)
     cleaned = "".join(c for c in cleaned if unicodedata.category(c) != "Mn")
 
     # Reemplazar múltiples espacios y guiones bajos consecutivos
-    import re
-
     cleaned = re.sub(r"[_\s]+", " ", cleaned).strip()
 
     # Limitar la longitud (Windows tiene límite de 260 caracteres para la ruta completa)
@@ -210,7 +209,6 @@ def cerrar_word_procesos():
 
         # Intentar cerrar Word de forma elegante primero
         try:
-
             pythoncom.CoInitialize()
             try:
                 word_app = win32com.client.GetActiveObject("Word.Application")
@@ -350,7 +348,6 @@ print("* Datos cargados y limpiados")
 def update_word_fields(doc_path):
     """Actualiza los campos del documento Word."""
     try:
-
         # Inicializar COM
         pythoncom.CoInitialize()
 
@@ -411,10 +408,14 @@ def update_word_fields(doc_path):
             pythoncom.CoUninitialize()
 
     except ImportError:
-        print("   ! Para actualizar automáticamente el índice, instala: pip install pywin32")
+        print(
+            "   ! Para actualizar automáticamente el índice, instala: pip install pywin32"
+        )
     except Exception as e:
         print(f"   ! Error general al actualizar índice: {e}")
-        print("   * El documento se generó correctamente, solo falló la actualización del índice")
+        print(
+            "   * El documento se generó correctamente, solo falló la actualización del índice"
+        )
 
 
 # Crear contexto para la plantilla
@@ -425,21 +426,17 @@ edificios_por_seccion = {
     key: df["EDIFICIO"].unique()[:-1] for key, df in all_dataframes.items()
 }
 
-edificios_totales = (
-    set(edificios_por_seccion["Conta"])
-)
+edificios_totales = set(edificios_por_seccion["Conta"])
 
 for edificio in sorted(edificios_totales):
-
     # Sub-DataFrames por edificio (sin última fila de totales)
     df_conta_edificio = df_conta[df_conta["EDIFICIO"] == edificio].iloc[:-1]
-
 
     context = {
         "mes": mes_nombre,
         "anio": anio,
         "df_conta": df_conta_edificio.to_dict("records"),
-        "tipo_de_suministro": df_conta_edificio["SUMINISTRO"].unique()
+        "tipo_de_suministro": df_conta_edificio["SUMINISTRO"].unique(),
     }
 
     doc = DocxTemplate(BytesIO(TEMPLATE_BYTES))
@@ -449,11 +446,16 @@ for edificio in sorted(edificios_totales):
         # Crear nombre de archivo limpio
         nombre_edificio = clean_filename(edificio)
         output_file = f"Anexo 2 {nombre_edificio}.docx"
-        output_path = BASE_DIR.parent / "word" / "anexos" / output_file
+
+        # Crear directorio para el edificio si no existe
+        edificio_dir = BASE_DIR.parent / "word" / "anexos" / nombre_edificio
+        edificio_dir.mkdir(parents=True, exist_ok=True)
+
+        output_path = edificio_dir / output_file
 
         # Guardar el documento
         doc.save(str(output_path))
-        print(f"* Documento generado: {output_file}")
+        print(f"* Documento generado: {nombre_edificio}/{output_file}")
 
         generated_docs.append(str(output_path))
 

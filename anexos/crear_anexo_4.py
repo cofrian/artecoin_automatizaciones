@@ -28,13 +28,13 @@ except ImportError:
 # 1) CONFIGURACIÓN ----------------------------------------------------
 # --------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
+WORD_DIR = BASE_DIR.parent / "word"  # Nueva variable para directorio de salida
 
 EXCEL_PATH = (
-    BASE_DIR.parent
-    / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1_V20.xlsx"
+    BASE_DIR.parent / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 2.xlsx"
 )
 TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_4.docx"
-OUTPUT_PATH = BASE_DIR / "ANEXO_4.docx"
+OUTPUT_PATH = WORD_DIR / "ANEXO_4.docx"  # Actualizado para usar WORD_DIR
 
 SHEET_MAP = {
     "Envol": "SISTEMAS CONSTRUCTIVOS",
@@ -425,9 +425,11 @@ for centro in centros:
     try:
         nombre_centro = clean_filename(centro)
         output_file = f"Anexo 4 {nombre_centro}.docx"
-        output_path = BASE_DIR.parent / "word" / "anexos" / output_file
+        anexos_dir = WORD_DIR / "anexos" / nombre_centro
+        anexos_dir.mkdir(parents=True, exist_ok=True)
+        output_path = anexos_dir / output_file
         doc.save(str(output_path))
-        print(f"* Documento generado: {output_file}")
+        print(f"* Documento generado: anexos/{nombre_centro}/{output_file}")
     except PermissionError as e:
         print(f"   ! Error de permisos con {output_file}: {e}")
         print("   ! Saltando este archivo...")
@@ -444,7 +446,8 @@ print(f"\n{'=' * 60}")
 print("PROCESO COMPLETADO")
 print(f"{'=' * 60}")
 print("Los documentos se encuentran en:")
-print(f"  {BASE_DIR.parent / 'word' / 'anexos'}")
+print(f"  {WORD_DIR / 'anexos'}")  # Actualizar el directorio mostrado
+print("  Todos los anexos en un solo directorio")
 print("\nSi algún archivo no se generó debido a errores de permisos,")
 print("cierra Word completamente y vuelve a ejecutar el script.")
 print(f"{'=' * 60}")

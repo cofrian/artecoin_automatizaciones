@@ -48,7 +48,7 @@ TEMPLATE_DOCX = (
 BUILDINGS_ROOT = Path(__file__).resolve().parent.parent / "CEE"
 
 # Carpeta de salida (se crea si no existe)
-OUTPUT_DIR = Path(__file__).resolve().parent / "salida_anexo_6"
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "word" / "anexos"
 
 
 # --------------------------------------------------------------------
@@ -308,12 +308,14 @@ def main():
         print("No se encontraron carpetas de edificios.")
         return
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Crear una carpeta temporal para la plantilla compartida
+    temp_dir = Path(__file__).resolve().parent / "temp_anexo_6"
+    temp_dir.mkdir(parents=True, exist_ok=True)
     print(f"Se encontraron {len(edificios)} edificios.")
 
     # Renderizar plantilla UNA vez y convertirla a PDF
     plantilla_pdf_compartida = (
-        OUTPUT_DIR / f"_Anexo_6__plantilla_{clean_filename(mes_render)}_{anio}.pdf"
+        temp_dir / f"_Anexo_6__plantilla_{clean_filename(mes_render)}_{anio}.pdf"
     )
     try:
         export_template_with_fields_to_pdf(
@@ -333,7 +335,6 @@ def main():
                 _worker_procesar_edificio,
                 str(ed),
                 str(plantilla_pdf_compartida),
-                str(OUTPUT_DIR),
             ): ed
             for ed in edificios
         }
@@ -354,6 +355,13 @@ def main():
                 print(f"  ! {edificio.name}: Error inesperado en worker: {e}")
                 resultados.append((edificio.name, False, f"Error worker: {e}"))
 
+    # Limpiar plantilla temporal
+    try:
+        plantilla_pdf_compartida.unlink()
+        temp_dir.rmdir()
+    except Exception:
+        pass
+
     # Resumen
     # CORREGIDO: f-string con salto de línea al inicio
     print("\nResumen:")
@@ -364,11 +372,11 @@ def main():
         for c in carpetas_sin_certs:
             print(f"   - {c}")
     # CORREGIDO: f-string con salto de línea al inicio
-    print(f"\nArchivos en: {OUTPUT_DIR}")
+    print(f"\nArchivos generados en las carpetas respectivas de cada edificio")
 
 
 def _worker_procesar_edificio(
-    edificio_dir_str: str, plantilla_pdf_str: str, output_dir_str: str
+    edificio_dir_str: str, plantilla_pdf_str: str
 ) -> tuple[str, bool, str]:
     """
     Worker de proceso: une plantilla + certificados del edificio.
@@ -377,12 +385,19 @@ def _worker_procesar_edificio(
     try:
         edificio_dir = Path(edificio_dir_str)
         plantilla_pdf = Path(plantilla_pdf_str)
-        output_dir = Path(output_dir_str)
         certificados = find_certificates(edificio_dir)
         if not certificados:
             return (edificio_dir.name, False, "Sin certificados")
-        nombre_base = clean_filename(edificio_dir.name)
-        salida_pdf = output_dir / f"Anexo_6_{nombre_base}.pdf"
+
+        # Limpiar nombre del edificio removiendo patrón "Cxxxx_" del inicio
+        nombre_edificio = edificio_dir.name
+        nombre_limpio = re.sub(r"^C\d+_", "", nombre_edificio)
+        nombre_base = clean_filename(nombre_limpio)
+
+        # Guardar el PDF en la carpeta word/anexos/{nombre_del_centro}/
+        output_center_dir = OUTPUT_DIR / nombre_base
+        output_center_dir.mkdir(parents=True, exist_ok=True)
+        salida_pdf = output_center_dir / f"Anexo_6_{nombre_base}.pdf"
         pdfs_a_unir = [plantilla_pdf] + [p for _, p in certificados]
         merge_pdfs_fast(salida_pdf, pdfs_a_unir)
         return (edificio_dir.name, True, str(salida_pdf))

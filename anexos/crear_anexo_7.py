@@ -56,7 +56,7 @@ TEMPLATE_DOCX = (
 BUILDINGS_ROOT = Path(__file__).resolve().parent.parent / "PLANOS"
 
 # Carpeta de salida (se crea si no existe)
-OUTPUT_DIR = Path(__file__).resolve().parent / "salida_anexo7"
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "word" / "anexos"
 
 
 # --------------------------------------------------------------------
@@ -137,6 +137,13 @@ def clean_filename(filename: str) -> str:
     if len(cleaned) > 120:
         cleaned = cleaned[:120].strip()
     return cleaned
+
+
+def clean_building_name(building_name: str) -> str:
+    """Elimina el prefijo 'Cxxxx_' del nombre del edificio y limpia caracteres no válidos."""
+    # Remover prefijo Cxxxx_ (donde xxxx son números)
+    cleaned = re.sub(r"^C\d+_", "", building_name)
+    return clean_filename(cleaned)
 
 
 def cerrar_word_procesos() -> None:
@@ -284,12 +291,20 @@ def _worker_procesar_edificio(
     try:
         edificio_dir = Path(edificio_dir_str)
         plantilla_pdf = Path(plantilla_pdf_str)
-        output_dir = Path(output_dir_str)
+        output_base_dir = Path(output_dir_str)
+
         certificados = find_certificates(edificio_dir)
         if not certificados:
             return (edificio_dir.name, False, "Sin planos")
-        nombre_base = clean_filename(edificio_dir.name)
-        salida_pdf = output_dir / f"Anexo_7_{nombre_base}.pdf"
+
+        # Limpiar el nombre del edificio removiendo Cxxxx_
+        nombre_limpio = clean_building_name(edificio_dir.name)
+
+        # Crear directorio de salida: word/anexos/{nombre_edificio_limpio}/
+        edificio_output_dir = output_base_dir / nombre_limpio
+        edificio_output_dir.mkdir(parents=True, exist_ok=True)
+
+        salida_pdf = edificio_output_dir / f"Anexo_7_{nombre_limpio}.pdf"
         pdfs_a_unir = [plantilla_pdf] + [p for _, p in certificados]
         merge_pdfs_fast(salida_pdf, pdfs_a_unir)
         return (edificio_dir.name, True, str(salida_pdf))
@@ -365,46 +380,48 @@ def main():
         print("No se encontraron carpetas de edificios.")
         return
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Se encontraron {len(edificios)} edificios.")
 
-    # Convertir plantilla UNA vez a PDF
-    plantilla_pdf_compartida = OUTPUT_DIR / "_Anexo_7__plantilla.pdf"
-    try:
-        word_to_pdf(TEMPLATE_DOCX, plantilla_pdf_compartida)
-    except Exception as e:
-        print(f"Error preparando plantilla PDF: {e}")
-        return
+    # Convertir plantilla UNA vez a PDF en ubicación temporal
+    import tempfile
 
-    carpetas_sin_planos = []
-    resultados = []
+    with tempfile.TemporaryDirectory() as temp_dir:
+        plantilla_pdf_compartida = Path(temp_dir) / "_Anexo_7__plantilla.pdf"
+        try:
+            word_to_pdf(TEMPLATE_DOCX, plantilla_pdf_compartida)
+        except Exception as e:
+            print(f"Error preparando plantilla PDF: {e}")
+            return
 
-    with ProcessPoolExecutor() as ex:
-        futs = {
-            ex.submit(
-                _worker_procesar_edificio,
-                str(ed),
-                str(plantilla_pdf_compartida),
-                str(OUTPUT_DIR),
-            ): ed
-            for ed in edificios
-        }
-        for fut in as_completed(futs):
-            edificio = futs[fut]
-            try:
-                nombre, ok, msg = fut.result()
-                if ok:
-                    print(f"  -> Generado: {msg}")
-                else:
-                    if "Sin planos" in msg:
-                        print(f"  ! {nombre}: {msg}")
-                        carpetas_sin_planos.append(str(edificio))
+        carpetas_sin_planos = []
+        resultados = []
+
+        with ProcessPoolExecutor() as ex:
+            futs = {
+                ex.submit(
+                    _worker_procesar_edificio,
+                    str(ed),
+                    str(plantilla_pdf_compartida),
+                    str(OUTPUT_DIR),  # Pasar el directorio base de salida
+                ): ed
+                for ed in edificios
+            }
+            for fut in as_completed(futs):
+                edificio = futs[fut]
+                try:
+                    nombre, ok, msg = fut.result()
+                    if ok:
+                        print(f"  -> Generado: {msg}")
                     else:
-                        print(f"  ! {nombre}: {msg}")
-                resultados.append((nombre, ok, msg))
-            except Exception as e:
-                print(f"  ! {edificio.name}: Error inesperado en worker: {e}")
-                resultados.append((edificio.name, False, f"Error worker: {e}"))
+                        if "Sin planos" in msg:
+                            print(f"  ! {nombre}: {msg}")
+                            carpetas_sin_planos.append(str(edificio))
+                        else:
+                            print(f"  ! {nombre}: {msg}")
+                    resultados.append((nombre, ok, msg))
+                except Exception as e:
+                    print(f"  ! {edificio.name}: Error inesperado en worker: {e}")
+                    resultados.append((edificio.name, False, f"Error worker: {e}"))
 
     print("Resumen:")
     ok_count = sum(1 for _, ok, _ in resultados if ok)
@@ -413,7 +430,7 @@ def main():
         print("  Carpetas sin planos:")
         for c in carpetas_sin_planos:
             print(f"   - {c}")
-    print(f"Archivos en: {OUTPUT_DIR}")
+    print(f"Archivos guardados en: {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
