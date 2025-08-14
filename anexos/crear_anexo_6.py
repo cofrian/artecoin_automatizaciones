@@ -372,7 +372,7 @@ def main():
         for c in carpetas_sin_certs:
             print(f"   - {c}")
     # CORREGIDO: f-string con salto de línea al inicio
-    print(f"\nArchivos generados en las carpetas respectivas de cada edificio")
+    print("\nArchivos generados en las carpetas respectivas de cada edificio")
 
 
 def _worker_procesar_edificio(
@@ -389,18 +389,26 @@ def _worker_procesar_edificio(
         if not certificados:
             return (edificio_dir.name, False, "Sin certificados")
 
+        # Extraer ID CENTRO del nombre de la carpeta (formato: Cxxxx_NOMBRE)
+        nombre_carpeta = edificio_dir.name
+        id_centro_match = re.match(r"^(C\d+)_", nombre_carpeta)
+        if id_centro_match:
+            id_centro = id_centro_match.group(1)  # Ej: "C0001"
+        else:
+            # Fallback si no se encuentra el patrón
+            id_centro = clean_filename(nombre_carpeta)
+
         # Limpiar nombre del edificio removiendo patrón "Cxxxx_" del inicio
-        nombre_edificio = edificio_dir.name
-        nombre_limpio = re.sub(r"^C\d+_", "", nombre_edificio)
+        nombre_limpio = re.sub(r"^C\d+_", "", nombre_carpeta)
         nombre_base = clean_filename(nombre_limpio)
 
-        # Guardar el PDF en la carpeta word/anexos/{nombre_del_centro}/
-        output_center_dir = OUTPUT_DIR / nombre_base
+        # Guardar el PDF en la carpeta word/anexos/{id_centro}/
+        output_center_dir = OUTPUT_DIR / id_centro
         output_center_dir.mkdir(parents=True, exist_ok=True)
         salida_pdf = output_center_dir / f"Anexo_6_{nombre_base}.pdf"
         pdfs_a_unir = [plantilla_pdf] + [p for _, p in certificados]
         merge_pdfs_fast(salida_pdf, pdfs_a_unir)
-        return (edificio_dir.name, True, str(salida_pdf))
+        return (edificio_dir.name, True, f"{id_centro}/{salida_pdf.name}")
     except Exception as e:
         return (edificio_dir.name, False, f"Error: {e}")
 

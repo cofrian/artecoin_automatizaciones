@@ -31,7 +31,7 @@ BASE_DIR = Path(__file__).resolve().parent
 WORD_DIR = BASE_DIR.parent / "word"  # Nueva variable para directorio de salida
 
 EXCEL_PATH = (
-    BASE_DIR.parent / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 2.xlsx"
+    BASE_DIR.parent / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1.xlsx"
 )
 TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_4.docx"
 OUTPUT_PATH = WORD_DIR / "ANEXO_4.docx"  # Actualizado para usar WORD_DIR
@@ -293,6 +293,78 @@ def get_user_input():
     return mes_nombre, anio
 
 
+def convert_docx_to_pdf_bulk(doc_paths: list[str]):
+    """
+    Convierte documentos DOCX a PDF en lote usando una sola instancia de Word.
+    """
+    if not HAS_PYWIN32 or pythoncom is None:
+        print("   ! pywin32 no disponible. No se pueden generar PDFs.")
+        return []
+
+    pdf_paths = []
+    pythoncom.CoInitialize()
+    try:
+        word_app = win32_client.Dispatch("Word.Application")
+        word_app.Visible = False
+        word_app.ScreenUpdating = False
+        word_app.DisplayAlerts = False
+
+        for doc_path in doc_paths:
+            doc_path = str(doc_path)
+            if not Path(doc_path).exists():
+                print(f"   ! No existe: {doc_path}")
+                continue
+
+            pdf_path = str(Path(doc_path).with_suffix(".pdf"))
+
+            try:
+                doc = word_app.Documents.Open(
+                    doc_path,
+                    ConfirmConversions=False,
+                    ReadOnly=True,
+                    AddToRecentFiles=False,
+                    Visible=False,
+                )
+
+                # Exportar a PDF usando valores numéricos directos
+                doc.ExportAsFixedFormat(
+                    OutputFileName=pdf_path,
+                    ExportFormat=17,  # wdExportFormatPDF = 17
+                    OpenAfterExport=False,
+                    OptimizeFor=0,  # wdExportOptimizeForPrint = 0
+                    BitmapMissingFonts=True,
+                    DocStructureTags=True,
+                    CreateBookmarks=1,  # wdExportCreateHeadingBookmarks = 1
+                    UseISO19005_1=False,
+                    Range=0,  # wdExportAllDocument = 0
+                    Item=0,  # wdExportDocumentContent = 0
+                    IncludeDocProps=True,
+                    KeepIRM=True,
+                )
+
+                doc.Close(SaveChanges=False)
+                pdf_paths.append(pdf_path)
+                print(f"   ✓ PDF generado: {Path(pdf_path).name}")
+
+            except Exception as e:
+                print(f"   ! Error al convertir {Path(doc_path).name} a PDF: {e}")
+                try:
+                    doc.Close(SaveChanges=False)
+                except Exception:
+                    pass
+                continue
+
+        # Cerrar Word
+        word_app.Quit()
+
+    except Exception as e:
+        print(f"   ! Error general en conversión a PDF: {e}")
+    finally:
+        pythoncom.CoUninitialize()
+
+    return pdf_paths
+
+
 # Obtener datos del usuario
 mes_nombre, anio = get_user_input()
 
@@ -390,6 +462,8 @@ print("* Datos cargados y limpiados")
 # Crear contexto para la plantilla
 print("-> Renderizando documentos...")
 
+generated_docs = []
+
 centros = []
 if GROUP_COLUMN in df_envol.columns:
     df_envol_filtrado = df_envol.copy()
@@ -405,6 +479,18 @@ else:
 for centro in centros:
     df_envol_centro = df_envol[df_envol[GROUP_COLUMN] == centro].copy()
     totales_envol = get_totales_centro(df_envol, df_envol_centro, "Envolvente")
+
+    # Obtener ID CENTRO del primer registro válido
+    id_centro = ""
+    if not df_envol_centro.empty:
+        for _, row in df_envol_centro.iterrows():
+            if pd.notna(row.get("ID CENTRO")):
+                id_centro = str(row.get("ID CENTRO", ""))
+                break
+
+    # Si no se encuentra ID CENTRO, usar el nombre del centro limpio como fallback
+    if not id_centro or id_centro.strip() == "":
+        id_centro = clean_filename(str(centro))
 
     # Ajustar etiqueta de la primera columna en totales si corresponde
     label_key = "EDIFICIO" if "EDIFICIO" in df_envol.columns else GROUP_COLUMN
@@ -423,13 +509,17 @@ for centro in centros:
     doc.render(context)
 
     try:
-        nombre_centro = clean_filename(centro)
+        # Crear nombre de archivo con el nombre del centro limpio
+        nombre_centro = clean_filename(str(centro))
         output_file = f"Anexo 4 {nombre_centro}.docx"
-        anexos_dir = WORD_DIR / "anexos" / nombre_centro
+
+        # Crear directorio usando ID CENTRO
+        anexos_dir = WORD_DIR / "anexos" / id_centro
         anexos_dir.mkdir(parents=True, exist_ok=True)
         output_path = anexos_dir / output_file
         doc.save(str(output_path))
-        print(f"* Documento generado: anexos/{nombre_centro}/{output_file}")
+        print(f"* Documento generado: {id_centro}/{output_file}")
+        generated_docs.append(str(output_path))
     except PermissionError as e:
         print(f"   ! Error de permisos con {output_file}: {e}")
         print("   ! Saltando este archivo...")
@@ -438,8 +528,15 @@ for centro in centros:
         print(f"   ! Error inesperado con {output_file}: {e}")
         continue
 
-print("\nTodos los documentos generados correctamente.")
+print("\nConvirtiendo documentos a PDF...")
+pdf_files = convert_docx_to_pdf_bulk(generated_docs)
 
+if pdf_files:
+    print(f"   ✓ Se generaron {len(pdf_files)} archivos PDF correctamente")
+else:
+    print("   ! No se pudieron generar archivos PDF")
+
+print("\nTodos los documentos generados correctamente.")
 
 # Mensaje final sobre archivos generados
 print(f"\n{'=' * 60}")
@@ -447,7 +544,12 @@ print("PROCESO COMPLETADO")
 print(f"{'=' * 60}")
 print("Los documentos se encuentran en:")
 print(f"  {WORD_DIR / 'anexos'}")  # Actualizar el directorio mostrado
-print("  Todos los anexos en un solo directorio")
+if pdf_files:
+    print("Archivos generados:")
+    print("  - Documentos Word (.docx)")
+    print("  - Documentos PDF (.pdf)")
+else:
+    print("  - Solo documentos Word (.docx)")
 print("\nSi algún archivo no se generó debido a errores de permisos,")
 print("cierra Word completamente y vuelve a ejecutar el script.")
 print(f"{'=' * 60}")

@@ -297,70 +297,28 @@ def _worker_procesar_edificio(
         if not certificados:
             return (edificio_dir.name, False, "Sin planos")
 
-        # Limpiar el nombre del edificio removiendo Cxxxx_
-        nombre_limpio = clean_building_name(edificio_dir.name)
+        # Extraer ID CENTRO del nombre de la carpeta (formato: Cxxxx_NOMBRE)
+        nombre_carpeta = edificio_dir.name
+        id_centro_match = re.match(r"^(C\d+)_", nombre_carpeta)
+        if id_centro_match:
+            id_centro = id_centro_match.group(1)  # Ej: "C0001"
+        else:
+            # Fallback si no se encuentra el patrón
+            id_centro = clean_filename(nombre_carpeta)
 
-        # Crear directorio de salida: word/anexos/{nombre_edificio_limpio}/
-        edificio_output_dir = output_base_dir / nombre_limpio
+        # Limpiar el nombre del edificio removiendo Cxxxx_
+        nombre_limpio = clean_building_name(nombre_carpeta)
+
+        # Crear directorio de salida: word/anexos/{id_centro}/
+        edificio_output_dir = output_base_dir / id_centro
         edificio_output_dir.mkdir(parents=True, exist_ok=True)
 
         salida_pdf = edificio_output_dir / f"Anexo_7_{nombre_limpio}.pdf"
         pdfs_a_unir = [plantilla_pdf] + [p for _, p in certificados]
         merge_pdfs_fast(salida_pdf, pdfs_a_unir)
-        return (edificio_dir.name, True, str(salida_pdf))
+        return (edificio_dir.name, True, f"{id_centro}/{salida_pdf.name}")
     except Exception as e:
         return (edificio_dir.name, False, f"Error: {e}")
-
-
-# Comentado temporalmente: no se solicita mes/año ni se insertan variables en Word.
-# def get_user_input():
-#     """Solicita al usuario el mes y año (estilo Anexo 3) con valores por defecto."""
-#     current_year = datetime.now().year
-#     current_month = datetime.now().month
-#     meses_espanol = {
-#         1: "Enero",
-#         2: "Febrero",
-#         3: "Marzo",
-#         4: "Abril",
-#         5: "Mayo",
-#         6: "Junio",
-#         7: "Julio",
-#         8: "Agosto",
-#         9: "Septiembre",
-#         10: "Octubre",
-#         11: "Noviembre",
-#         12: "Diciembre",
-#     }
-#     while True:
-#         try:
-#             print(f"\nMes actual: {meses_espanol[current_month]} ({current_month})")
-#             mes_input = input(
-#                 f"Ingrese el mes (1-12) [Enter para usar {current_month}]: "
-#             ).strip()
-#             mes_num = current_month if mes_input == "" else int(mes_input)
-#             if 1 <= mes_num <= 12:
-#                 mes_nombre = meses_espanol[mes_num]
-#                 break
-#             else:
-#                 print("Error: El mes debe estar entre 1 y 12")
-#         except ValueError:
-#             print("Error: Por favor ingrese un número válido")
-#     while True:
-#         try:
-#             anio_input = input(
-#                 f"Ingrese el año [Enter para usar {current_year}]: "
-#             ).strip()
-#             anio = current_year if anio_input == "" else int(anio_input)
-#             if anio - 5 <= anio <= anio + 5:
-#                 break
-#             else:
-#                 print(f"Error: El año debe estar entre {anio - 5} y {anio + 5}")
-#         except ValueError:
-#             print("Error: Por favor ingrese un año válido")
-#     print("\nConfiguración seleccionada:")
-#     print(f"   Mes: {mes_nombre}")
-#     print(f"   Año: {anio}")
-#     return mes_nombre, anio
 
 
 def main():

@@ -29,7 +29,7 @@ from io import BytesIO
 BASE_DIR = Path(__file__).resolve().parent
 
 EXCEL_PATH = (
-    BASE_DIR.parent / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 1.xlsx"
+    BASE_DIR.parent / "excel/proyecto/ANALISIS AUD-ENER_COLMENAR VIEJO_CONSULTA 2.xlsx"
 )
 TEMPLATE_DOC = BASE_DIR.parent / "word/anexos/Plantilla_Anexo_2.docx"
 # Cachear la plantilla en memoria para reuso (más rápido que leer de disco cada vez)
@@ -422,40 +422,53 @@ def update_word_fields(doc_path):
 print("-> Renderizando documentos...")
 
 generated_docs = []
-edificios_por_seccion = {
-    key: df["EDIFICIO"].unique()[:-1] for key, df in all_dataframes.items()
+centros_por_seccion = {
+    key: df["CENTRO"].unique()[:-1] for key, df in all_dataframes.items()
 }
 
-edificios_totales = set(edificios_por_seccion["Conta"])
+centros_totales = set(centros_por_seccion["Conta"])
 
-for edificio in sorted(edificios_totales):
-    # Sub-DataFrames por edificio (sin última fila de totales)
-    df_conta_edificio = df_conta[df_conta["EDIFICIO"] == edificio].iloc[:-1]
+for centro in sorted(centros_totales):
+    # Sub-DataFrames por centro (sin última fila de totales)
+    df_conta_centro = df_conta[df_conta["CENTRO"] == centro].iloc[:-1]
+
+    # Obtener ID CENTRO del primer registro válido
+    id_centro = ""
+    if not df_conta_centro.empty:
+        for _, row in df_conta_centro.iterrows():
+            if pd.notna(row.get("ID CENTRO")):
+                id_centro = str(row.get("ID CENTRO", ""))
+                break
+
+    # Si no se encuentra ID CENTRO, usar el nombre del centro limpio como fallback
+    if not id_centro or id_centro.strip() == "":
+        id_centro = clean_filename(centro)
 
     context = {
         "mes": mes_nombre,
         "anio": anio,
-        "df_conta": df_conta_edificio.to_dict("records"),
-        "tipo_de_suministro": df_conta_edificio["SUMINISTRO"].unique(),
+        "centro": centro,
+        "df_conta": df_conta_centro.to_dict("records"),
+        "tipo_de_suministro": df_conta_centro["SUMINISTRO"].unique(),
     }
 
     doc = DocxTemplate(BytesIO(TEMPLATE_BYTES))
     doc.render(context)
 
     try:
-        # Crear nombre de archivo limpio
-        nombre_edificio = clean_filename(edificio)
-        output_file = f"Anexo 2 {nombre_edificio}.docx"
+        # Crear nombre de archivo con el nombre del centro limpio
+        nombre_centro = clean_filename(centro)
+        output_file = f"Anexo 2 {nombre_centro}.docx"
 
-        # Crear directorio para el edificio si no existe
-        edificio_dir = BASE_DIR.parent / "word" / "anexos" / nombre_edificio
-        edificio_dir.mkdir(parents=True, exist_ok=True)
+        # Crear directorio usando ID CENTRO
+        centro_dir = BASE_DIR.parent / "word" / "anexos" / id_centro
+        centro_dir.mkdir(parents=True, exist_ok=True)
 
-        output_path = edificio_dir / output_file
+        output_path = centro_dir / output_file
 
         # Guardar el documento
         doc.save(str(output_path))
-        print(f"* Documento generado: {nombre_edificio}/{output_file}")
+        print(f"* Documento generado: {id_centro}/{output_file}")
 
         generated_docs.append(str(output_path))
 
@@ -469,6 +482,159 @@ for edificio in sorted(edificios_totales):
 
 print("\nActualizando campos en lote (TOC: solo paginación)...")
 update_word_fields_bulk(generated_docs, toc_mode="pn")
+
+
+def convert_docx_to_pdf_bulk(doc_paths: list[str]):
+    """
+    Convierte documentos DOCX a PDF en lote usando una sola instancia de Word.
+    """
+    if not win32_available or pythoncom is None:
+        print("   ! pywin32 no disponible. No se pueden generar PDFs.")
+        return []
+
+    pdf_paths = []
+    pythoncom.CoInitialize()
+    try:
+        word_app = win32com.client.Dispatch("Word.Application")
+        word_app.Visible = False
+        word_app.ScreenUpdating = False
+        word_app.DisplayAlerts = False
+
+        for doc_path in doc_paths:
+            doc_path = str(doc_path)
+            if not Path(doc_path).exists():
+                print(f"   ! No existe: {doc_path}")
+                continue
+
+            pdf_path = str(Path(doc_path).with_suffix(".pdf"))
+
+            try:
+                doc = word_app.Documents.Open(
+                    doc_path,
+                    ConfirmConversions=False,
+                    ReadOnly=True,
+                    AddToRecentFiles=False,
+                    Visible=False,
+                )
+
+                # Exportar a PDF usando valores numéricos directos
+                doc.ExportAsFixedFormat(
+                    OutputFileName=pdf_path,
+                    ExportFormat=17,  # wdExportFormatPDF = 17
+                    OpenAfterExport=False,
+                    OptimizeFor=0,  # wdExportOptimizeForPrint = 0
+                    BitmapMissingFonts=True,
+                    DocStructureTags=True,
+                    CreateBookmarks=1,  # wdExportCreateHeadingBookmarks = 1
+                    UseISO19005_1=False,
+                    Range=0,  # wdExportAllDocument = 0
+                    Item=0,  # wdExportDocumentContent = 0
+                    IncludeDocProps=True,
+                    KeepIRM=True,
+                )
+
+                doc.Close(SaveChanges=False)
+                pdf_paths.append(pdf_path)
+                print(f"   ✓ PDF generado: {Path(pdf_path).name}")
+
+            except Exception as e:
+                print(f"   ! Error al convertir {Path(doc_path).name} a PDF: {e}")
+                try:
+                    doc.Close(SaveChanges=False)
+                except Exception:
+                    pass
+                continue
+
+        # Cerrar Word
+        word_app.Quit()
+
+    except Exception as e:
+        print(f"   ! Error general en conversión a PDF: {e}")
+    finally:
+        pythoncom.CoUninitialize()
+
+    return pdf_paths
+
+
+def remove_last_page_from_pdfs(pdf_paths: list[str]):
+    """
+    Elimina la última página de los archivos PDF proporcionados.
+    """
+    if not pdf_paths:
+        return
+
+    # Intentar importar librerías PDF
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        try:
+            from PyPDF2 import PdfReader, PdfWriter  # type: ignore
+        except ImportError:
+            print(
+                "   ! No se encontró pypdf o PyPDF2. No se pueden modificar los PDFs."
+            )
+            return
+
+    modified_count = 0
+
+    for pdf_path in pdf_paths:
+        try:
+            # Leer el PDF
+            reader = PdfReader(pdf_path)
+            total_pages = len(reader.pages)
+
+            if total_pages <= 1:
+                print(
+                    f"   ! {Path(pdf_path).name} tiene solo {total_pages} página(s), no se modifica"
+                )
+                continue
+
+            # Crear nuevo PDF sin la última página
+            writer = PdfWriter()
+            for page_num in range(total_pages - 1):  # Excluir la última página
+                writer.add_page(reader.pages[page_num])
+
+            # Escribir a archivo temporal
+            temp_path = pdf_path + ".temp"
+            with open(temp_path, "wb") as temp_file:
+                writer.write(temp_file)
+
+            # Reemplazar el archivo original
+            Path(temp_path).replace(pdf_path)
+
+            print(
+                f"   ✓ Última página eliminada de: {Path(pdf_path).name} ({total_pages} → {total_pages - 1} páginas)"
+            )
+            modified_count += 1
+
+        except Exception as e:
+            print(f"   ! Error al modificar {Path(pdf_path).name}: {e}")
+            # Limpiar archivo temporal si existe
+            temp_path = pdf_path + ".temp"
+            if Path(temp_path).exists():
+                try:
+                    Path(temp_path).unlink()
+                except Exception:
+                    pass
+            continue
+
+    if modified_count > 0:
+        print(f"   ✓ Se modificaron {modified_count} archivos PDF correctamente")
+    else:
+        print("   ! No se pudo modificar ningún archivo PDF")
+
+
+print("\nConvirtiendo documentos a PDF...")
+pdf_files = convert_docx_to_pdf_bulk(generated_docs)
+
+if pdf_files:
+    print(f"   ✓ Se generaron {len(pdf_files)} archivos PDF correctamente")
+
+    print("\nEliminando última página de los PDFs...")
+    remove_last_page_from_pdfs(pdf_files)
+else:
+    print("   ! No se pudieron generar archivos PDF")
+
 print("\nTodos los documentos generados correctamente.")
 
 # Mensaje final sobre archivos generados
@@ -477,6 +643,12 @@ print("PROCESO COMPLETADO")
 print(f"{'=' * 60}")
 print("Los documentos se encuentran en:")
 print(f"  {BASE_DIR.parent / 'word' / 'anexos'}")
+if pdf_files:
+    print("Archivos generados:")
+    print("  - Documentos Word (.docx)")
+    print("  - Documentos PDF (.pdf)")
+else:
+    print("  - Solo documentos Word (.docx)")
 print("\nSi algún archivo no se generó debido a errores de permisos,")
 print("cierra Word completamente y vuelve a ejecutar el script.")
 print(f"{'=' * 60}")
