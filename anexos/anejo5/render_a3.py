@@ -126,31 +126,39 @@ def ensure_placeholders_in_outdir(out_dir: Path) -> dict:
     search = [p for p in _gather_svg_search_paths() if p.exists()]
     result = {"main": "", "alt": ""}
 
-    if search:
-        target = out_dir / DEFAULT_SVG_MAIN
+    # Copia el principal (main)
+    main_svg = None
+    for p in search:
+        if Path(p).name.lower() == Path(DEFAULT_SVG_MAIN).name.lower():
+            main_svg = p
+            break
+    if main_svg:
+        target = out_dir / Path(DEFAULT_SVG_MAIN).name
         if not target.exists():
             try:
-                copy2(search[0], target)
+                copy2(main_svg, target)
                 print(f"[ASSET] Copiado placeholder -> {target}")
             except Exception as e:
-                print(f"[WARN] No se pudo copiar {search[0]} -> {target}: {e}")
+                print(f"[WARN] No se pudo copiar {main_svg} -> {target}: {e}")
         if target.exists():
-            result["main"] = DEFAULT_SVG_MAIN
+            result["main"] = Path(DEFAULT_SVG_MAIN).name
 
-    if len(search) > 1:
-        # Busca un alternativo distinto del principal
-        for cand in search[1:]:
-            if Path(cand).name.lower() != DEFAULT_SVG_MAIN.lower():
-                target = out_dir / DEFAULT_SVG_ALT
-                if not target.exists():
-                    try:
-                        copy2(cand, target)
-                        print(f"[ASSET] Copiado placeholder alt -> {target}")
-                    except Exception as e:
-                        print(f"[WARN] No se pudo copiar {cand} -> {target}: {e}")
-                if target.exists():
-                    result["alt"] = DEFAULT_SVG_ALT
-                break
+    # Copia el alternativo (alt)
+    alt_svg = None
+    for p in search:
+        if Path(p).name.lower() == Path(DEFAULT_SVG_ALT).name.lower():
+            alt_svg = p
+            break
+    if alt_svg:
+        target = out_dir / Path(DEFAULT_SVG_ALT).name
+        if not target.exists():
+            try:
+                copy2(alt_svg, target)
+                print(f"[ASSET] Copiado placeholder alt -> {target}")
+            except Exception as e:
+                print(f"[WARN] No se pudo copiar {alt_svg} -> {target}: {e}")
+        if target.exists():
+            result["alt"] = Path(DEFAULT_SVG_ALT).name
 
     return result
 
