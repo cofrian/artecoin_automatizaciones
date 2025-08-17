@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{bloque}} — {{id}}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script>
+      (function () {
+        const MAX_COLS = 3;
+
+        function onceImagesSettle(root) {
+          const imgs = root.querySelectorAll("img");
+          if (!imgs.length) return Promise.resolve();
+          let pending = imgs.length;
+          return new Promise((resolve) => {
+            const done = () => --pending === 0 && resolve();
+            imgs.forEach((img) => {
+              if (img.complete) done();
+              else {
+                img.addEventListener("load", done, { once: true });
+                img.addEventListener("error", done, { once: true });
+              }
+            });
+          });
+        }
+
+        function setCols(grid, cols) {
+          grid.classList.remove("cols-1", "cols-2", "cols-3");
+          grid.classList.add(`cols-${cols}`);
+        }
+
+        function clearFlags(grid) {
+          grid
+            .querySelectorAll(
+              ".ph-card.span-full, .ph-card.span-clamped, .ph-card.pair-2of3-a, .ph-card.pair-2of3-b, .ph-card.span-all, .ph-card.row-fill-a, .ph-card.row-fill-b"
+            )
+            .forEach((el) =>
+              el.classList.remove(
+                "span-full",
+                "span-clamped",
+                "pair-2of3-a",
+                "pair-2of3-b",
+                "span-all",
+                "row-fill-a",
+                "row-fill-b"
+              )
+            );
+        }
+
+        function applyLayout() {
+          const container = document.querySelector(".fotos-container");
+          const grid = document.querySelector(".ph-grid");
+          if (!container || !grid) return;
+
+          clearFlags(grid);
+
+          const cards = [...grid.children].filter((n) =>
+            n.classList?.contains("ph-card")
+          );
+          const n = cards.length;
+
+          if (n === 0) {
+            setCols(grid, 1);
+            return;
+          }
+          if (n === 1) {
+            setCols(grid, 1);
+            return;
+          }
+
+          // 2 imágenes -> 1 columna (stack)
+          if (n === 2) {
+            setCols(grid, 1);
+            return;
+          }
+
+          // 3 imágenes -> 2 columnas + última FULL
+          if (n === 3) {
+            setCols(grid, 2);
+            cards[n - 1].classList.add("span-full");
+            return;
+          }
+
+          // 4 -> 2x2
+          if (n === 4) {
+            setCols(grid, 2);
+            return;
+          }
+
+          // 5 -> 2x2 + última centrada (no full)
+          if (n === 5) {
+            setCols(grid, 2);
+            cards[n - 1].classList.add("span-clamped");
+            return;
+          }
+
+          // 6 empieza en 2; 7+ fuerza 3
+          let cols = n >= 7 ? 3 : 2;
+          setCols(grid, cols);
+
+          if (cols === 2) {
+            if (n % 2 === 1) cards[n - 1].classList.add("span-clamped");
+
+            // Si no cabe en alto con 2, sube a 3 y aplica reglas de restos en 3
+            void grid.offsetHeight;
+            if (grid.scrollHeight > container.clientHeight) {
+              cols = 3;
+              setCols(grid, 3);
+            } else {
+              return;
+            }
+          }
+
+          // --- Reglas con 3 columnas ---
+          const r = n % 3;
+
+          if (r === 1) {
+            // 7,10,13... -> última ocupa las 3 columnas
+            cards[n - 1].classList.add("span-all");
+            void grid.offsetHeight;
+            if (grid.scrollHeight > container.clientHeight) {
+              // Fallback: centrada al ancho de 1/3
+              cards[n - 1].classList.remove("span-all");
+              cards[n - 1].classList.add("span-clamped");
+            }
+          }
+        }
+
+        async function setup() {
+          const grid = document.querySelector(".ph-grid");
+          if (!grid) return;
+          await onceImagesSettle(grid);
+          applyLayout();
+          window.addEventListener("resize", applyLayout);
+          new MutationObserver(applyLayout).observe(grid, {
+            childList: true,
+            subtree: false,
+          });
+        }
+
+        if (document.readyState === "loading")
+          document.addEventListener("DOMContentLoaded", setup);
+        else setup();
+      })();
+    </script>
+
+    <style>
+      /* Página A3 apaisado y fondos impresos */
+      @page {
+        size: A3 landscape;
+        margin: 0;
+      }
+      html,
+      body {
+        /* Dimensiones exactas A3 horizontal: 420mm x 297mm */
+        width: 420mm;
+        height: 297mm;
+        margin: 0;
+        padding: 0;
+        font-family: Arial, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", sans-serif;
+        font-size: 10pt;
+        overflow: hidden;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+        /* Centrar en pantalla para visualización */
+        position: relative;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        background: url("./A3_FOTOS_AUDITORIA_SIN_ICONO.svg") no-repeat;
+        background-size: contain;
+        background-position: center center;
+        position: relative;
+        /* Reset del transform para el body */
+        left: 0;
+        top: 0;
+        transform: none;
+        box-shadow: none;
+      }
+
+      /* Layout general (dos columnas 50%-50%) */
+      .container {
+        position: absolute;
+        top: 17%;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 100%;
+        height: 80%;
+        display: grid;
+        overflow: hidden;
+        grid-template-columns: 1fr 1fr;
+        gap: 2%;
+        justify-content: center;
+        padding: 0 3%;
+        box-sizing: border-box;
+      }
+      .col {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      /* Tabla de datos estilo mejorado basado en Tailwind */
+      table.kv {
+        width: 100%;
+        border-collapse: collapse;
+        background: #fff;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1),
+          0 1px 2px 0 rgba(0, 0, 0, 0.06);
+      }
+      .kv th,
+      .kv td {
+        padding: 5px 8px;
+        border-bottom: 1px solid #e5e7eb;
+        vertical-align: middle;
+        font-size: 8.7pt;
+        line-height: 1.25;
+        min-height: 28px;
+      }
+      .kv th {
+        background: #f3f4f6;
+        color: #1f2937;
+        font-weight: 600;
+        width: 40%;
+        text-align: left;
+        letter-spacing: 0.2px;
+        border-right: 1px solid #e5e7eb;
+      }
+      .kv td {
+        background: #ffffff;
+        color: #1f2937;
+        width: 60%;
+      }
+      /* Filas impares con color D9E2F3, filas pares blancas */
+      .kv tr:nth-child(odd) th {
+        background: #d9e2f3;
+      }
+      .kv tr:nth-child(odd) td {
+        background: #d9e2f3;
+      }
+      .kv tr:nth-child(even) th {
+        background: #ffffff;
+      }
+      .kv tr:nth-child(even) td {
+        background: #ffffff;
+      }
+      .kv tr:hover th,
+      .kv tr:hover td {
+        background: #bfdbfe !important;
+      }
+      .kv tr:last-child th,
+      .kv tr:last-child td {
+        border-bottom: none;
+      }
+
+      /* Soporte para layout tipo grid en tabla */
+      .table-grid {
+        display: grid;
+        grid-template-columns: 40% 60%;
+        width: 100%;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        overflow: hidden;
+        background: #fff;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1),
+          0 1px 2px 0 rgba(0, 0, 0, 0.06);
+      }
+
+      .table-grid .grid-header {
+        padding: 8px 12px;
+        background: #f3f4f6;
+        color: #1f2937;
+        font-weight: 600;
+        border-right: 1px solid #e5e7eb;
+        border-bottom: 1px solid #e5e7eb;
+        display: flex;
+        align-items: center;
+        min-height: 28px;
+        font-size: 8.7pt;
+      }
+
+      .table-grid .grid-cell {
+        padding: 8px 12px;
+        background: #ffffff;
+        color: #1f2937;
+        border-bottom: 1px solid #e5e7eb;
+        display: flex;
+        align-items: center;
+        min-height: 28px;
+        font-size: 8.7pt;
+      }
+
+      .table-grid .grid-row:nth-child(even) .grid-header {
+        background: #f3f4f6;
+      }
+
+      .table-grid .grid-row:nth-child(even) .grid-cell {
+        background: #d9e2f3;
+      }
+
+      .table-grid .grid-row:last-child .grid-header,
+      .table-grid .grid-row:last-child .grid-cell {
+        border-bottom: none;
+      }
+
+      /* ======================= FOTOS: MAX-FILL, SIN MARCO ======================= */
+      :root {
+        --ph-gap: 3mm;
+      }
+
+      .fotos-container {
+        background: transparent;
+        border: 0;
+
+        height: 860px; /* si prefieres auto+flex, puedes quitarlo */
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: auto; /* scroll solo aquí si hiciera falta */
+      }
+
+      /* Título para sección de imágenes */
+      .fotos-titulo {
+        font-size: 1.25rem;
+        color: #1f2937;
+        margin-bottom: 1.25rem;
+        border-left: 4px solid #ef4444;
+        padding-left: 1rem;
+        font-weight: 600;
+      }
+
+      .ph-grid {
+        display: grid;
+        gap: var(--ph-gap);
+        grid-template-columns: 1fr;
+        grid-auto-rows: auto;
+        align-content: start;
+        min-height: 0;
+      }
+
+      .ph-card.single-center {
+        grid-column: 1 / -1; /* ocupa la fila entera */
+        justify-self: center; /* se centra horizontalmente */
+        width: calc(
+          (100% - var(--ph-gap)) / 2
+        ); /* ancho exacto de 1 columna (2 col + gap) */
+      }
+
+      /* Si subimos a 3 columnas, desactivamos este centrado para que se ubique normal */
+      .ph-grid.cols-3 .ph-card.single-center {
+        grid-column: auto;
+        justify-self: stretch;
+        width: auto;
+      }
+
+      /* Hacer una tarjeta a ancho completo */
+      .ph-card.span-full {
+        grid-column: 1 / -1;
+      }
+
+      .ph-card {
+        background: #fff;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        min-height: 0;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
+      }
+
+      .ph-imgwrap {
+        flex: 1 1 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        aspect-ratio: 4 / 3; /* asegura proporción y buen “fill” */
+      }
+
+      .ph-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: center;
+        display: block;
+      }
+      .ph-cap {
+        padding: 0.5rem;
+        background: #f9fafb;
+        border-top: 1px solid #e5e7eb;
+        font-size: 0.75rem;
+        text-align: center;
+      }
+
+      /* Sin imágenes placeholder */
+      .no-photos-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 12rem;
+        border: 2px dashed #d1d5db;
+        border-radius: 0.5rem;
+        color: #6b7280;
+        flex-direction: column;
+        text-align: center;
+      }
+
+      .no-photos-placeholder .icon {
+        font-size: 2.5rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .no-photos-placeholder .text {
+        font-size: 1.125rem;
+      }
+
+      /* Soporte explícito para 1/2/3 columnas */
+      .ph-grid.cols-1 {
+        grid-template-columns: 1fr;
+      }
+      .ph-grid.cols-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .ph-grid.cols-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      /* “Span” que NO ocupa el 100%: centrado y limitado al ancho de 1 columna */
+      .ph-card.span-clamped {
+        grid-column: 1 / -1; /* ocupa la fila completa para poder centrarse */
+        justify-self: center; /* centrado horizontal */
+        width: 100%;
+        max-width: 100%; /* fallback */
+      }
+
+      /* En 2 columnas: limitar al ancho exacto de 1 columna */
+      .ph-grid.cols-2 .ph-card.span-clamped {
+        max-width: calc((100% - var(--ph-gap)) / 2);
+      }
+
+      /* En 3 columnas: limitar al ancho exacto de 1 columna (de 3) */
+      .ph-grid.cols-3 .ph-card.span-clamped {
+        max-width: calc((100% - 2 * var(--ph-gap)) / 3);
+      }
+
+      .ph-grid.cols-3 .ph-card.pair-2of3-a {
+        grid-column: 2 / span 1;
+      }
+      .ph-grid.cols-3 .ph-card.pair-2of3-b {
+        grid-column: 3 / span 1;
+      }
+
+      /* 7 -> la última ocupa las 3 columnas */
+      .ph-grid.cols-3 .ph-card.span-all {
+        grid-column: 1 / -1;
+      }
+
+      /* 8 -> las dos últimas llenan la fila (2/3 + 1/3) */
+      .ph-grid.cols-3 .ph-card.row-fill-a {
+        grid-column: 1 / span 2; /* ocupa columnas 1 y 2 */
+      }
+      .ph-grid.cols-3 .ph-card.row-fill-b {
+        grid-column: 3 / span 1; /* ocupa columna 3 */
+      }
+
+      /* Fallback para 2 sobrantes centradas (ya lo tenías) */
+      .ph-grid.cols-3 .ph-card.pair-2of3-a {
+        grid-column: 2 / span 1;
+      }
+      .ph-grid.cols-3 .ph-card.pair-2of3-b {
+        grid-column: 3 / span 1;
+      }
+
+      /* ======================================================================== */
+    </style>
+  </head>
+
+  <body>
+    <!-- Título grupo sobre el recuadro gris del SVG -->
+    <div style="position: absolute; top: 8.4%; left: 6.5%; z-index: 2">
+      <div style="margin-bottom: 8px">
+        <span
+          style="
+            font-size: 1.25em;
+            font-weight: bold;
+            letter-spacing: 1px;
+            color: #2c2c2c;
+            text-shadow: 0 1px 4px #fff;
+          "
+        >
+          GRUPO: ILUMINACIÓN
+        </span>
+        <span>{{id}}</span>
+      </div>
+    </div>
+
+    <div class="container">
+      <!-- Columna izquierda: datos -->
+      <section class="col" style="margin-right: 0">
+        <h3
+          style="
+            font-size: 1.25rem;
+            color: #1f2937;
+            margin-bottom: 1.25rem;
+            border-left: 4px solid #3b82f6;
+            padding-left: 1rem;
+            font-weight: 600;
+          "
+        >
+          Datos de Iluminación
+        </h3>
+
+        <table class="kv">
+          <tbody>
+            <tr>
+              <th>ID CENTRO</th>
+              <td>{{id_centro}}</td>
+            </tr>
+            <tr>
+              <th>ID EDIFICIO</th>
+              <td>{{id_edificio}}</td>
+            </tr>
+            <tr>
+              <th>ID DEPENDENCIA</th>
+              <td>{{id_dependencia}}</td>
+            </tr>
+            <tr>
+              <th>ID</th>
+              <td>{{id}}</td>
+            </tr>
+            <tr>
+              <th>BLOQUE</th>
+              <td>{{bloque}}</td>
+            </tr>
+            <tr>
+              <th>TIPO EDIFICIO</th>
+              <td>{{tipo_edificio}}</td>
+            </tr>
+            <tr>
+              <th>TIPO ED - GEO - ILUM</th>
+              <td>{{tipo_ed_geo}}</td>
+            </tr>
+            <tr>
+              <th>CENTRO</th>
+              <td>{{centro}}</td>
+            </tr>
+            <tr>
+              <th>EDIFICIO</th>
+              <td>{{edificio}}</td>
+            </tr>
+            <tr>
+              <th>DEPENDENCIAS</th>
+              <td>{{dependencias}}</td>
+            </tr>
+            <tr>
+              <th>DENOMINACIÓN</th>
+              <td>{{denominacion}}</td>
+            </tr>
+            <tr>
+              <th>SITUACIÓN ACORTADA</th>
+              <td>{{situacion_acortada}}</td>
+            </tr>
+            <tr>
+              <th>SITUACIÓN</th>
+              <td>{{situacion}}</td>
+            </tr>
+            <tr>
+              <th>ALTURA</th>
+              <td>{{altura}}</td>
+            </tr>
+            <tr>
+              <th>TIPO SOPORTE</th>
+              <td>{{tipo_soporte}}</td>
+            </tr>
+            <tr>
+              <th>SITUACIÓN SOPORTE</th>
+              <td>{{situacion_soporte}}</td>
+            </tr>
+            <tr>
+              <th>TIPO LUMINARIA</th>
+              <td>{{tipo_luminaria_corregida}}</td>
+            </tr>
+            <tr>
+              <th>TIPO LÁMPARA</th>
+              <td>{{tipo_lampara_corregida}}</td>
+            </tr>
+            <tr>
+              <th>EQUIPO AUXILIAR</th>
+              <td>{{equipo_auxiliar}}</td>
+            </tr>
+            <tr>
+              <th>REGULACIÓN</th>
+              <td>{{regulacion}}</td>
+            </tr>
+            <tr>
+              <th>PANTALLA_REFLECTANTE</th>
+              <td>{{pantalla_reflectante}}</td>
+            </tr>
+            <tr>
+              <th>NIVEL_ILUMINACION_MEDIO_LUX</th>
+              <td>{{nivel_iluminacion_lux}}</td>
+            </tr>
+            <tr>
+              <th>OBSERVACIONES</th>
+              <td>{{observaciones}}</td>
+            </tr>
+            <tr>
+              <th>POTENCIA NOMINAL (W)</th>
+              <td>{{potencia_nominal}}</td>
+            </tr>
+            <tr>
+              <th>Nº LUMINARIAS</th>
+              <td>{{num_luminarias}}</td>
+            </tr>
+            <tr>
+              <th>Nº LÁMPARAS</th>
+              <td>{{num_lamparas}}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- Columna derecha: fotos -->
+      <section class="col" style="overflow-x: auto">
+        <h3 class="fotos-titulo">Imágenes de Iluminación</h3>
+        <div class="fotos-container">
+          <!-- ZONA_FOTOS_INICIO -->
+          [[FOTOS_ILUM]]
+          <!-- ZONA_FOTOS_FIN -->
+        </div>
+      </section>
+    </div>
+  </body>
+</html>
