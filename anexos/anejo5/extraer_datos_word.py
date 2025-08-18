@@ -452,7 +452,7 @@ def _mostrar_resumen(excel_path: Path, fotos_path: Path, opciones: dict):
 # ==========================
 NORMALIZE_EMPTY_TO = "–"
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".bmp", ".gif"}
-FUZZY_THRESHOLD_DEFAULT = 0.88  # 1.0 = solo exacto; <1.0 permite aproximado
+FUZZY_THRESHOLD_DEFAULT = 1  # 1.0 = solo exacto; <1.0 permite aproximado
 MAX_SEQUENTIAL_PHOTOS = 10  # Máximo número de fotos secuenciales por entidad
 
 SHEETS = {
@@ -2359,3 +2359,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
