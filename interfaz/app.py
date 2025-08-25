@@ -25,6 +25,7 @@ import time
 import queue
 import threading
 import subprocess
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
@@ -55,6 +56,8 @@ class RunOptions:
     html_templates_dir: Optional[str]   # opcional
     photos_dir: Optional[str]           # opcional
     output_dir: Optional[str]           # opcional
+    month: Optional[int]                # nuevo opcional (1..12)
+    year: Optional[int]                 # nuevo opcional (YYYY)
 
 
 # ---------------------------
@@ -104,6 +107,22 @@ class Validator:
             has_excel = False
         if not has_excel:
             return False, "La carpeta de Excel no contiene archivos .xls/.xlsx/.xlsm."
+        # Validar mes/año
+        if opts.month is not None:
+            try:
+                m = int(opts.month)
+            except Exception:
+                return False, "Mes inválido."
+            if m < 1 or m > 12:
+                return False, "El mes debe estar entre 1 y 12."
+        if opts.year is not None:
+            try:
+                y = int(opts.year)
+            except Exception:
+                return False, "Año inválido."
+            if y < 2000 or y > datetime.now().year + 5:
+                return False, "Año fuera de rango razonable."
+
 
         # Rutas opcionales si vienen informadas
         if opts.word_dir and not os.path.isdir(opts.word_dir):
@@ -155,8 +174,12 @@ class ProcessRunner:
         candidates = [
             (os.path.join(base_dir, "anexos_creator.exe"), True),
             (os.path.join(base_dir, "anexos_creator.py"), False),
+            (os.path.join(base_dir, "anexos_creator_refactor_v3.exe"), True),
+            (os.path.join(base_dir, "anexos_creator_refactor_v3.py"), False),
             (os.path.abspath("anexos_creator.exe"), True),
             (os.path.abspath("anexos_creator.py"), False),
+            (os.path.abspath("anexos_creator_refactor_v3.exe"), True),
+            (os.path.abspath("anexos_creator_refactor_v3.py"), False),
         ]
         for path, is_exe in candidates:
             if os.path.isfile(path):
@@ -181,6 +204,19 @@ class ProcessRunner:
         else:
             cmd += ["--mode", "single", "--anexo", str(opts.anexo)]
         # NUEVOS FLAGS OPCIONALES
+        if opts.html_templates_dir:
+            cmd += ["--html-templates-dir", opts.html_templates_dir]
+        if opts.photos_dir:
+            cmd += ["--photos-dir", opts.photos_dir]
+        if opts.output_dir:
+            cmd += ["--output-dir", opts.output_dir]
+        # Mes y año para evitar input()
+        if opts.month:
+            cmd += ["--month", str(opts.month)]
+        if opts.year:
+            cmd += ["--year", str(opts.year)]
+
+
         if opts.html_templates_dir:
             cmd += ["--html-templates-dir", opts.html_templates_dir]
         if opts.photos_dir:
@@ -288,6 +324,10 @@ class AnexosApp(ctk.CTk):
         self.output_dir = StringVar(value="")
         self.mode_var = StringVar(value="all")
         self.anexo_value = IntVar(value=ANEXO_CHOICES[0])
+        now = datetime.now()
+        self.month_var = StringVar(value=str(now.month).zfill(2))
+        self.year_var = IntVar(value=now.year)
+
 
     # ----- UI -----
 
@@ -351,6 +391,42 @@ class AnexosApp(ctk.CTk):
         self.combo_anexo.configure(state="disabled")
         self.combo_anexo.grid(row=0, column=4, sticky="w", padx=10, pady=10)
 
+        # Mes / Año (fila nueva con combos)
+        ctk.CTkLabel(opts_frame, text="Mes:", font=font_label)\
+            .grid(row=1, column=0, sticky="w", padx=10, pady=(0,10))
+        month_names = [
+            ("01", "01 - Enero"), ("02", "02 - Febrero"), ("03", "03 - Marzo"),
+            ("04", "04 - Abril"), ("05", "05 - Mayo"), ("06", "06 - Junio"),
+            ("07", "07 - Julio"), ("08", "08 - Agosto"), ("09", "09 - Septiembre"),
+            ("10", "10 - Octubre"), ("11", "11 - Noviembre"), ("12", "12 - Diciembre"),
+        ]
+        self.combo_month = ctk.CTkComboBox(
+            opts_frame,
+            values=[label for _val, label in month_names],
+            width=180, height=38, font=font_label,
+            command=lambda v: self.month_var.set(v.split(" - ")[0])
+        )
+        # Inicializa combo con el mes de state
+        try:
+            idx = int(self.month_var.get()) - 1
+        except Exception:
+            idx = 0
+        self.combo_month.set(month_names[idx][1])
+        self.combo_month.grid(row=1, column=1, sticky="w", padx=10, pady=(0,10))
+
+        ctk.CTkLabel(opts_frame, text="Año:", font=font_label)\
+            .grid(row=1, column=2, sticky="e", padx=10, pady=(0,10))
+        year_now = datetime.now().year
+        years = [str(y) for y in range(year_now - 50, year_now + 50)]
+        self.combo_year = ctk.CTkComboBox(
+            opts_frame,
+            values=years,
+            width=120, height=38, font=font_label,
+            command=lambda v: self.year_var.set(int(v))
+        )
+        self.combo_year.set(str(self.year_var.get()))
+        self.combo_year.grid(row=1, column=3, sticky="w", padx=10, pady=(0,10))
+
         opts_frame.grid_columnconfigure(2, weight=1)
 
         # Botonera
@@ -372,25 +448,12 @@ class AnexosApp(ctk.CTk):
         self.txt_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
         self._log("Listo. Configura las carpetas y el modo, luego pulsa 'Ejecutar'.")
 
-        # Entrada para el proceso (stdin)
-        stdin_frame = ctk.CTkFrame(self)
-        stdin_frame.pack(fill="x", padx=14, pady=(6, 14))
-        ctk.CTkLabel(stdin_frame, text="Entrada para el proceso (cuando pida input):", font=font_label)\
-            .grid(row=0, column=0, sticky="w", padx=10, pady=10)
-        self.entry_stdin = ctk.CTkEntry(stdin_frame, width=680, height=38, font=font_label)
-        self.entry_stdin.grid(row=0, column=1, sticky="we", padx=10, pady=10)
-        self.btn_send = ctk.CTkButton(stdin_frame, text="Enviar", width=120, height=38, font=font_btn,
-                                      command=self._on_send_input, state="disabled")
-        self.btn_send.grid(row=0, column=2, padx=10, pady=10)
-        self.entry_stdin.bind("<Return>", lambda _e: self._on_send_input())
-
-        stdin_frame.grid_columnconfigure(1, weight=1)
-
+        
         # Ayuda
         hint = ctk.CTkLabel(
             self,
             text=("Consejo: las carpetas de Word, plantillas HTML, fotos y salida son opcionales. "
-                  "Si el proceso pide datos (ej. número de mes), escribe aquí y pulsa Enter."),
+                  "Selecciona el mes y el año arriba; ya no se pedirá por consola."),
             text_color=("gray40", "gray70"),
             font=ctk.CTkFont(size=12, slant="italic"),
             wraplength=980
@@ -453,6 +516,27 @@ class AnexosApp(ctk.CTk):
         self.photos_dir.set(cfg.get("photos_dir", ""))
         self.output_dir.set(cfg.get("output_dir", ""))
 
+        # Mes/Año
+        m = str(cfg.get("month", str(datetime.now().month).zfill(2)))
+        y = int(cfg.get("year", datetime.now().year))
+        self.month_var.set(m.zfill(2))
+        try:
+            idx = int(self.month_var.get()) - 1
+        except Exception:
+            idx = 0
+        if hasattr(self, 'combo_month'):
+            month_names = [
+                ("01", "01 - Enero"), ("02", "02 - Febrero"), ("03", "03 - Marzo"),
+                ("04", "04 - Abril"), ("05", "05 - Mayo"), ("06", "06 - Junio"),
+                ("07", "07 - Julio"), ("08", "08 - Agosto"), ("09", "09 - Septiembre"),
+                ("10", "10 - Octubre"), ("11", "11 - Noviembre"), ("12", "12 - Diciembre"),
+            ]
+            self.combo_month.set(month_names[idx][1])
+        self.year_var.set(y)
+        if hasattr(self, 'combo_year'):
+            self.combo_year.set(str(y))
+
+
         mode = cfg.get("mode", "all")
         if mode not in ("all", "single"):
             mode = "all"
@@ -479,6 +563,8 @@ class AnexosApp(ctk.CTk):
             html_templates_dir=(self.html_templates_dir.get().strip() or None),
             photos_dir=(self.photos_dir.get().strip() or None),
             output_dir=(self.output_dir.get().strip() or None),
+            month=int(self.month_var.get()),
+            year=int(self.year_var.get()),
         )
 
     def _ensure_output_dir(self, output_dir: Optional[str]) -> bool:
@@ -496,7 +582,6 @@ class AnexosApp(ctk.CTk):
                 messagebox.showerror(APP_NAME, f"No se pudo crear la carpeta:\n{e}", parent=self)
                 return False
         return False
-
     def _on_run(self) -> None:
         opts = self._collect_options()
         ok, msg = Validator.validate_options(opts)
@@ -517,6 +602,8 @@ class AnexosApp(ctk.CTk):
             "html_templates_dir": opts.html_templates_dir or "",
             "photos_dir": opts.photos_dir or "",
             "output_dir": opts.output_dir or "",
+            "month": int(self.month_var.get()),
+            "year": int(self.year_var.get()),
         })
 
         # Avisos no intrusivos
@@ -532,36 +619,24 @@ class AnexosApp(ctk.CTk):
         try:
             self.btn_run.configure(state="disabled")
             self.btn_stop.configure(state="normal")
-            self.btn_send.configure(state="normal")  # permitir stdin
-            self._log("\n=== Iniciando proceso de anexos ===")
+            self._log("\\n=== Iniciando proceso de anexos ===")
             self.runner.start(opts)
         except FileNotFoundError as e:
             self.btn_run.configure(state="normal")
             self.btn_stop.configure(state="disabled")
-            self.btn_send.configure(state="disabled")
             messagebox.showerror(APP_NAME, str(e), parent=self)
         except Exception as e:
             self.btn_run.configure(state="normal")
             self.btn_stop.configure(state="disabled")
-            self.btn_send.configure(state="disabled")
-            messagebox.showerror(APP_NAME, f"Error al iniciar el proceso:\n{e}", parent=self)
+            messagebox.showerror(APP_NAME, f"Error al iniciar el proceso:\\n{e}", parent=self)
+
 
     def _on_stop(self) -> None:
         if self.runner.is_running():
             self.runner.stop()
         self.btn_stop.configure(state="disabled")
         self.btn_run.configure(state="normal")
-        self.btn_send.configure(state="disabled")
-
-    def _on_send_input(self) -> None:
-        text = self.entry_stdin.get().strip()
-        if not text:
-            return
-        if self.runner.send_input(text):
-            self._log(f">>> {text}")
-            self.entry_stdin.delete(0, "end")
-        else:
-            messagebox.showwarning(APP_NAME, "No hay un proceso en ejecución o no acepta entrada.", parent=self)
+        
 
     def _on_close(self) -> None:
         if self.runner.is_running():
@@ -570,7 +645,6 @@ class AnexosApp(ctk.CTk):
             self.runner.stop()
             time.sleep(0.3)
         self.destroy()
-
     # ----- polling de logs -----
 
     def _poll_logs(self) -> None:
@@ -584,12 +658,10 @@ class AnexosApp(ctk.CTk):
         if self.runner.is_running():
             self.btn_stop.configure(state="normal")
             self.btn_run.configure(state="disabled")
-            self.btn_send.configure(state="normal")
         else:
             self.btn_stop.configure(state="disabled")
             self.btn_run.configure(state="normal")
-            self.btn_send.configure(state="disabled")
-        # reprogramar
+                    # reprogramar
         self.after(100, self._poll_logs)
 
 
