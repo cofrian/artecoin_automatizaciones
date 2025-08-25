@@ -1,15 +1,17 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
 GUI (customtkinter) para ejecutar 'anexos_creator.py' o 'anexos_creator.exe' sin usar la terminal.
 
-Cambios respecto a la versión anterior:
-- UTF-8 explícito.
-- Radio buttons con una única variable (alternancia correcta entre "todos" y "uno").
-- Soporte de entradas interactivas al proceso (stdin) para manejar llamadas a input() en anexos_creator.py.
-- Widgets más grandes (escalado y alturas) para mejor usabilidad.
-- Estructura con SRP: Validator, ProcessRunner, ConfigStore, AnexosApp.
+NOVEDADES:
+- Campos opcionales: carpeta de plantillas HTML y carpeta de fotos.
+- Campo opcional: carpeta de salida para los anexos generados (si no existe, se propone crearla).
+- Mantiene: soporte stdin para input() del subproceso, logs en tiempo real, cancelación segura, y persistencia de configuración.
+
+Arquitectura (SRP / SOLID):
+- RunOptions (dataclass) modela la configuración de ejecución.
+- Validator valida entradas (sin efectos colaterales).
+- ConfigStore persiste/restaura ajustes del usuario.
+- ProcessRunner aísla la estrategia de ejecución y E/S del subproceso (stdout/err, stdin).
+- AnexosApp orquesta la UI, estados y flujos de usuario.
 
 Requisitos:
     pip install customtkinter
@@ -46,10 +48,13 @@ ANEXO_CHOICES = [2, 3, 4, 5, 6, 7]
 @dataclass(frozen=True)
 class RunOptions:
     """Opciones de ejecución para 'anexos_creator'."""
-    excel_dir: str
-    word_dir: Optional[str]
-    mode: str                 # "all" | "single"
-    anexo: Optional[int]      # 2..7 cuando mode == "single"
+    excel_dir: str                      # OBLIGATORIO
+    word_dir: Optional[str]             # opcional
+    mode: str                           # "all" | "single"
+    anexo: Optional[int]                # 2..7 cuando mode == "single"
+    html_templates_dir: Optional[str]   # opcional
+    photos_dir: Optional[str]           # opcional
+    output_dir: Optional[str]           # opcional
 
 
 # ---------------------------
@@ -84,10 +89,11 @@ class ConfigStore:
 # ---------------------------
 
 class Validator:
-    """Valida coherencia de opciones antes de ejecutar."""
+    """Valida coherencia de opciones antes de ejecutar (sin efectos colaterales)."""
 
     @staticmethod
     def validate_options(opts: RunOptions) -> Tuple[bool, str]:
+        # Excel es obligatorio
         if not opts.excel_dir or not os.path.isdir(opts.excel_dir):
             return False, "Debes seleccionar una carpeta de Excel válida."
 
@@ -99,14 +105,21 @@ class Validator:
         if not has_excel:
             return False, "La carpeta de Excel no contiene archivos .xls/.xlsx/.xlsm."
 
-        if opts.word_dir:
-            if not os.path.isdir(opts.word_dir):
-                return False, "La carpeta de Word indicada no existe."
+        # Rutas opcionales si vienen informadas
+        if opts.word_dir and not os.path.isdir(opts.word_dir):
+            return False, "La carpeta de Word indicada no existe."
+
+        if opts.html_templates_dir and not os.path.isdir(opts.html_templates_dir):
+            return False, "La carpeta de plantillas HTML indicada no existe."
+
+        if opts.photos_dir and not os.path.isdir(opts.photos_dir):
+            return False, "La carpeta de fotos indicada no existe."
 
         if opts.mode == "single":
             if opts.anexo not in ANEXO_CHOICES:
                 return False, "Selecciona un anexo válido (2 a 7)."
 
+        # output_dir es opcional: si no existe lo gestionamos en la capa de UI (preguntando si crear)
         return True, ""
 
 
@@ -163,11 +176,17 @@ class ProcessRunner:
         cmd += ["--excel-dir", opts.excel_dir]
         if opts.word_dir:
             cmd += ["--word-dir", opts.word_dir]
-
         if opts.mode == "all":
             cmd += ["--mode", "all"]
         else:
             cmd += ["--mode", "single", "--anexo", str(opts.anexo)]
+        # NUEVOS FLAGS OPCIONALES
+        if opts.html_templates_dir:
+            cmd += ["--html-templates-dir", opts.html_templates_dir]
+        if opts.photos_dir:
+            cmd += ["--photos-dir", opts.photos_dir]
+        if opts.output_dir:
+            cmd += ["--output-dir", opts.output_dir]
 
         creationflags = 0
         if os.name == "nt":
@@ -177,7 +196,7 @@ class ProcessRunner:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,          # <--- para permitir input() desde la GUI
+            stdin=subprocess.PIPE,          # permite input() desde la GUI
             text=True,
             bufsize=1,
             universal_newlines=True,
@@ -234,15 +253,15 @@ class AnexosApp(ctk.CTk):
 
     def __init__(self) -> None:
         super().__init__()
-        # Apariencia y escalado más grande
+        # Apariencia y escalado (usabilidad)
         ctk.set_appearance_mode("system")
         ctk.set_default_color_theme("blue")
-        ctk.set_widget_scaling(1.15)   # <--- widgets más grandes
+        ctk.set_widget_scaling(1.15)
         ctk.set_window_scaling(1.05)
 
         self.title(APP_NAME)
-        self.geometry("980x680")
-        self.minsize(880, 560)
+        self.geometry("1040x760")
+        self.minsize(920, 640)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.runner = ProcessRunner(self.log_queue)
@@ -258,7 +277,10 @@ class AnexosApp(ctk.CTk):
     def _build_state(self) -> None:
         self.excel_dir = StringVar(value="")
         self.word_dir = StringVar(value="")
-        self.mode_var = StringVar(value="all")  # <--- una única variable para alternar
+        self.html_templates_dir = StringVar(value="")
+        self.photos_dir = StringVar(value="")
+        self.output_dir = StringVar(value="")
+        self.mode_var = StringVar(value="all")
         self.anexo_value = IntVar(value=ANEXO_CHOICES[0])
 
     # ----- UI -----
@@ -274,25 +296,26 @@ class AnexosApp(ctk.CTk):
         title = ctk.CTkLabel(self, text="Interfaz de Anexos", font=font_title)
         title.pack(**pad, anchor="w")
 
-        # Frame selección carpetas
+        # Frame selección carpetas (dos columnas)
         paths_frame = ctk.CTkFrame(self)
         paths_frame.pack(fill="x", **pad)
 
-        # Excel
-        ctk.CTkLabel(paths_frame, text="Carpeta de Excel (obligatoria):", font=font_label)\
-            .grid(row=0, column=0, sticky="w", padx=10, pady=10)
-        self.entry_excel = ctk.CTkEntry(paths_frame, textvariable=self.excel_dir, width=600, height=38, state="disabled")
-        self.entry_excel.grid(row=0, column=1, sticky="we", padx=10, pady=10)
-        ctk.CTkButton(paths_frame, text="Seleccionar...", command=self._choose_excel, height=38, font=font_btn)\
-            .grid(row=0, column=2, padx=10, pady=10)
+        # Helper para fila de selección de carpeta
+        def path_row(r: int, label: str, var: StringVar, browse_cmd, required: bool = False):
+            lab_txt = f"{label}{' (obligatoria)' if required else ''}:"
+            ctk.CTkLabel(paths_frame, text=lab_txt, font=font_label)\
+                .grid(row=r, column=0, sticky="w", padx=10, pady=10)
+            entry = ctk.CTkEntry(paths_frame, textvariable=var, width=620, height=38, state="disabled")
+            entry.grid(row=r, column=1, sticky="we", padx=10, pady=10)
+            ctk.CTkButton(paths_frame, text="Seleccionar...", command=browse_cmd, height=38, font=font_btn)\
+                .grid(row=r, column=2, padx=10, pady=10)
 
-        # Word
-        ctk.CTkLabel(paths_frame, text="Carpeta de Word (plantillas):", font=font_label)\
-            .grid(row=1, column=0, sticky="w", padx=10, pady=10)
-        self.entry_word = ctk.CTkEntry(paths_frame, textvariable=self.word_dir, width=600, height=38, state="disabled")
-        self.entry_word.grid(row=1, column=1, sticky="we", padx=10, pady=10)
-        ctk.CTkButton(paths_frame, text="Seleccionar...", command=self._choose_word, height=38, font=font_btn)\
-            .grid(row=1, column=2, padx=10, pady=10)
+        # Filas
+        path_row(0, "Carpeta de Excel", self.excel_dir, self._choose_excel, required=True)
+        path_row(1, "Carpeta de Word (plantillas)", self.word_dir, self._choose_word)
+        path_row(2, "Carpeta de plantillas HTML", self.html_templates_dir, self._choose_html_templates)
+        path_row(3, "Carpeta de fotos", self.photos_dir, self._choose_photos)
+        path_row(4, "Carpeta de salida (anexos)", self.output_dir, self._choose_output)
 
         paths_frame.grid_columnconfigure(1, weight=1)
 
@@ -348,7 +371,7 @@ class AnexosApp(ctk.CTk):
         stdin_frame.pack(fill="x", padx=14, pady=(6, 14))
         ctk.CTkLabel(stdin_frame, text="Entrada para el proceso (cuando pida input):", font=font_label)\
             .grid(row=0, column=0, sticky="w", padx=10, pady=10)
-        self.entry_stdin = ctk.CTkEntry(stdin_frame, width=620, height=38, font=font_label)
+        self.entry_stdin = ctk.CTkEntry(stdin_frame, width=680, height=38, font=font_label)
         self.entry_stdin.grid(row=0, column=1, sticky="we", padx=10, pady=10)
         self.btn_send = ctk.CTkButton(stdin_frame, text="Enviar", width=120, height=38, font=font_btn,
                                       command=self._on_send_input, state="disabled")
@@ -360,11 +383,11 @@ class AnexosApp(ctk.CTk):
         # Ayuda
         hint = ctk.CTkLabel(
             self,
-            text="Consejo: si tu proceso usa plantillas Word, selecciona la carpeta de Word. "
-                 "Si el proceso pide datos (ej. número de mes), escribe aquí y pulsa Enter.",
+            text=("Consejo: las carpetas de Word, plantillas HTML, fotos y salida son opcionales. "
+                  "Si el proceso pide datos (ej. número de mes), escribe aquí y pulsa Enter."),
             text_color=("gray40", "gray70"),
             font=ctk.CTkFont(size=12, slant="italic"),
-            wraplength=900
+            wraplength=980
         )
         hint.pack(padx=14, pady=(0, 12), anchor="w")
 
@@ -386,6 +409,21 @@ class AnexosApp(ctk.CTk):
         if path:
             self.word_dir.set(path)
 
+    def _choose_html_templates(self) -> None:
+        path = filedialog.askdirectory(title="Selecciona carpeta de plantillas HTML")
+        if path:
+            self.html_templates_dir.set(path)
+
+    def _choose_photos(self) -> None:
+        path = filedialog.askdirectory(title="Selecciona carpeta de fotos")
+        if path:
+            self.photos_dir.set(path)
+
+    def _choose_output(self) -> None:
+        path = filedialog.askdirectory(title="Selecciona carpeta de salida para anexos")
+        if path:
+            self.output_dir.set(path)
+
     def _on_mode_change(self) -> None:
         # Habilitar/deshabilitar combo según modo
         if self.mode_var.get() == "single":
@@ -405,6 +443,9 @@ class AnexosApp(ctk.CTk):
         cfg = ConfigStore.load()
         self.excel_dir.set(cfg.get("excel_dir", ""))
         self.word_dir.set(cfg.get("word_dir", ""))
+        self.html_templates_dir.set(cfg.get("html_templates_dir", ""))
+        self.photos_dir.set(cfg.get("photos_dir", ""))
+        self.output_dir.set(cfg.get("output_dir", ""))
 
         mode = cfg.get("mode", "all")
         if mode not in ("all", "single"):
@@ -428,8 +469,27 @@ class AnexosApp(ctk.CTk):
             excel_dir=self.excel_dir.get().strip(),
             word_dir=(self.word_dir.get().strip() or None),
             mode=mode,
-            anexo=anexo
+            anexo=anexo,
+            html_templates_dir=(self.html_templates_dir.get().strip() or None),
+            photos_dir=(self.photos_dir.get().strip() or None),
+            output_dir=(self.output_dir.get().strip() or None),
         )
+
+    def _ensure_output_dir(self, output_dir: Optional[str]) -> bool:
+        """Si se ha indicado carpeta de salida y no existe, propone crearla."""
+        if not output_dir:
+            return True
+        if os.path.isdir(output_dir):
+            return True
+        # Preguntar si crear
+        if messagebox.askyesno(APP_NAME, f"La carpeta de salida no existe:\n\n{output_dir}\n\n¿Deseas crearla?", parent=self):
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                return True
+            except Exception as e:
+                messagebox.showerror(APP_NAME, f"No se pudo crear la carpeta:\n{e}", parent=self)
+                return False
+        return False
 
     def _on_run(self) -> None:
         opts = self._collect_options()
@@ -438,21 +498,35 @@ class AnexosApp(ctk.CTk):
             messagebox.showerror(APP_NAME, msg, parent=self)
             return
 
+        # Crear output_dir si fue indicado y no existe
+        if not self._ensure_output_dir(opts.output_dir):
+            return
+
         # Guardar selección
         ConfigStore.save({
             "excel_dir": opts.excel_dir,
             "word_dir": opts.word_dir or "",
             "mode": opts.mode,
             "anexo": opts.anexo or "",
+            "html_templates_dir": opts.html_templates_dir or "",
+            "photos_dir": opts.photos_dir or "",
+            "output_dir": opts.output_dir or "",
         })
 
+        # Avisos no intrusivos
         if not opts.word_dir:
-            messagebox.showinfo(APP_NAME, "No se seleccionó carpeta de Word (plantillas).", parent=self)
+            self._log("Aviso: no se seleccionó carpeta de Word (plantillas).")
+        if not opts.html_templates_dir:
+            self._log("Aviso: no se seleccionó carpeta de plantillas HTML.")
+        if not opts.photos_dir:
+            self._log("Aviso: no se seleccionó carpeta de fotos.")
+        if not opts.output_dir:
+            self._log("Aviso: no se seleccionó carpeta de salida; se usará la predeterminada del proceso (si aplica).")
 
         try:
             self.btn_run.configure(state="disabled")
             self.btn_stop.configure(state="normal")
-            self.btn_send.configure(state="normal")  # permitir enviar stdin cuando esté corriendo
+            self.btn_send.configure(state="normal")  # permitir stdin
             self._log("\n=== Iniciando proceso de anexos ===")
             self.runner.start(opts)
         except FileNotFoundError as e:
