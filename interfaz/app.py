@@ -192,15 +192,21 @@ class ProcessRunner:
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+        env_utf8 = dict(os.environ)
+        env_utf8.setdefault('PYTHONIOENCODING', 'utf-8')
+        env_utf8.setdefault('PYTHONUTF8', '1')
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE,          # permite input() desde la GUI
             text=True,
+            encoding='utf-8',              # fuerza decodificación UTF-8
+            errors='replace',              # evita errores por caracteres inesperados
             bufsize=1,
             universal_newlines=True,
             creationflags=creationflags,
+            env=env_utf8,
         )
 
         def _reader() -> None:
