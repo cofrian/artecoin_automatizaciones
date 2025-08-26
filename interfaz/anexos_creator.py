@@ -42,6 +42,9 @@ from pypdf import PdfReader, PdfWriter  # type: ignore
 from win32com.client import CDispatch  # type: ignore
 
 
+# Silenciar avisos verbosos de pypdf (duplicados /PageMode, etc.)
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+
 # =====================================================================================
 # Configuración / utilidades
 # =====================================================================================
@@ -91,6 +94,8 @@ class RunConfig:
     html_templates_dir: Optional[Path] = None
     photos_dir: Optional[Path] = None
     output_dir: Optional[Path] = None
+    cee_dir: Optional[Path] = None  # carpeta de certificados energéticos
+    plans_dir: Optional[Path] = None  # carpeta de planos
 
 
 @dataclass(frozen=True)
@@ -137,6 +142,13 @@ class PdfInspector(Protocol):
     def read_total_pages(self, pdf_path: Path) -> int: ...
     def convert_docx_to_pdf_bulk(self, doc_paths: List[str]) -> List[str]: ...
     def remove_last_page_from_pdfs(self, pdf_paths: List[str]) -> None: ...
+    def merge_pdfs(self, output_pdf: Path, pdf_paths: List[Path]) -> None: ...
+
+
+class CertificateRepository(Protocol):
+    """Gestiona la búsqueda y ordenación de certificados energéticos."""
+
+    def find_certificates(self, building_dir: Path) -> List[Tuple[int, Path]]: ...
 
 
 class ExcelRepository(Protocol):
@@ -163,6 +175,12 @@ class OutputPathBuilder(Protocol):
     def build_output_docx_path(
         self, config: RunConfig, center_id: str, filename: str
     ) -> Path: ...
+
+
+class PlansRepository(Protocol):
+    """Gestiona la búsqueda y ordenación de planos."""
+
+    def find_plans(self, building_dir: Path) -> List[Tuple[int, Path]]: ...
 
 
 # =====================================================================================
@@ -557,23 +575,33 @@ class DefaultWordExporter:
                         toc = doc.TablesOfContents(1)
                         toc.UpdatePageNumbers()
                     except Exception as e:
-                        logger.debug(f"   ! Error al actualizar TOC en {Path(doc_path_str).name}: {e}")
+                        logger.debug(
+                            f"   ! Error al actualizar TOC en {Path(doc_path_str).name}: {e}"
+                        )
 
                     # Guardar y cerrar
                     try:
                         doc.Save()
                         doc.Close(SaveChanges=False)
-                        logger.debug(f"   ✓ Campos actualizados: {Path(doc_path_str).name}")
+                        logger.debug(
+                            f"   ✓ Campos actualizados: {Path(doc_path_str).name}"
+                        )
                     except Exception as e:
-                        logger.warning(f"   ! Error al guardar/cerrar {Path(doc_path_str).name}: {e}")
+                        logger.warning(
+                            f"   ! Error al guardar/cerrar {Path(doc_path_str).name}: {e}"
+                        )
 
                 except Exception as e:
-                    logger.warning(f"   ! No se pudo abrir: {Path(doc_path_str).name} -> {e}")
+                    logger.warning(
+                        f"   ! No se pudo abrir: {Path(doc_path_str).name} -> {e}"
+                    )
                     continue
 
             # Cerrar Word
             word_app.Quit()
-            logger.info(f"   ✓ Campos actualizados en {len([p for p in doc_paths if Path(p).exists()])} documentos")
+            logger.info(
+                f"   ✓ Campos actualizados en {len([p for p in doc_paths if Path(p).exists()])} documentos"
+            )
 
         except Exception as e:
             logger.error(f"   ! Error general en actualización de campos: {e}")
@@ -671,7 +699,7 @@ class DefaultPdfInspector:
         Convierte documentos DOCX a PDF en lote usando una sola instancia de Word.
         """
         pdf_paths: List[str] = []
-        
+
         try:
             pythoncom.CoInitialize()
             word_app = win32_client.Dispatch("Word.Application")
@@ -720,7 +748,9 @@ class DefaultPdfInspector:
                     logger.info(f"   ✓ PDF generado: {Path(pdf_path).name}")
 
                 except Exception as e:
-                    logger.warning(f"   ! Error al convertir {Path(doc_path_str).name} a PDF: {e}")
+                    logger.warning(
+                        f"   ! Error al convertir {Path(doc_path_str).name} a PDF: {e}"
+                    )
                     try:
                         doc.Close(SaveChanges=False)
                     except Exception:
@@ -791,9 +821,93 @@ class DefaultPdfInspector:
                 continue
 
         if modified_count > 0:
-            logger.info(f"   ✓ Se modificaron {modified_count} archivos PDF correctamente")
+            logger.info(
+                f"   ✓ Se modificaron {modified_count} archivos PDF correctamente"
+            )
         else:
             logger.warning("   ! No se pudo modificar ningún archivo PDF")
+
+    def merge_pdfs(self, output_pdf: Path, pdf_paths: List[Path]) -> None:
+        """Une varios PDFs en uno solo usando pypdf."""
+        try:
+            # Intentar usar pikepdf si está disponible (más rápido y robusto)
+            import pikepdf  # type: ignore
+
+            with pikepdf.Pdf.new() as dst:
+                for pdf_path in pdf_paths:
+                    try:
+                        with pikepdf.open(str(pdf_path)) as src:
+                            dst.pages.extend(src.pages)
+                    except Exception as e:
+                        logger.warning(f"Error añadiendo PDF {pdf_path}: {e}")
+                        continue
+                output_pdf.parent.mkdir(parents=True, exist_ok=True)
+                dst.save(str(output_pdf))
+            return
+        except ImportError:
+            # Fallback a pypdf si pikepdf no está disponible
+            pass
+        except Exception as e:
+            logger.debug(f"pikepdf falló, usando pypdf: {e}")
+
+        # Usar pypdf como fallback
+        writer = PdfWriter()
+        for pdf_path in pdf_paths:
+            try:
+                writer.append(str(pdf_path))
+            except Exception as e:
+                logger.warning(f"Error añadiendo PDF {pdf_path}: {e}")
+                continue
+
+        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        with output_pdf.open("wb") as f:
+            writer.write(f)
+
+
+# ---------------- Certificate Repository ----------------
+
+
+class DefaultCertificateRepository:
+    """Implementación del repositorio de certificados energéticos."""
+
+    # Patrones regex para identificar certificados válidos
+    ENDS_OK_RE = re.compile(r"(?i)CEE[_\s-]*ACTUAL\.pdf$")
+    E_NUM_RE = re.compile(r"(?i)[_\s-]E(\d+)[_\s-]CEE[_\s-]*ACTUAL\.pdf$")
+
+    def find_certificates(self, building_dir: Path) -> List[Tuple[int, Path]]:
+        """
+        Busca PDFs de certificados en la carpeta del edificio y subcarpetas.
+        Formatos válidos (case-insensitive):
+            {nombre}_E1_CEE_ACTUAL.pdf
+            {nombre}_E2_CEE_ACTUAL.pdf
+            ...
+            {nombre}_CEE_ACTUAL.pdf  (si solo hay uno, se considera E1)
+
+        Returns:
+            Lista de tuplas (orden_E, ruta_pdf) ordenadas por número E.
+        """
+        certs: List[Tuple[int, Path]] = []
+
+        if not building_dir.exists() or not building_dir.is_dir():
+            return certs
+
+        # Buscar recursivamente en la carpeta del edificio
+        for pdf_file in building_dir.rglob("*.pdf"):
+            if not pdf_file.is_file():
+                continue
+
+            filename = pdf_file.name
+
+            # Verificar si el archivo coincide con el patrón de certificado
+            if self.ENDS_OK_RE.search(filename):
+                # Extraer número E si existe
+                match = self.E_NUM_RE.search(filename)
+                order = int(match.group(1)) if match else 1
+                certs.append((order, pdf_file))
+
+        # Ordenar por número E y luego por nombre de archivo
+        certs.sort(key=lambda x: (x[0], x[1].name.lower()))
+        return certs
 
 
 # ---------------- Excel Repository ----------------
@@ -812,7 +926,7 @@ class DefaultExcelRepository:
         "Ilum": "Sistemas de Iluminación",
         "OtrosEq": "Otros Equipos",
         "Conta": "Conta",
-        "Envol": "Envol"
+        "Envol": "Envol",
     }
 
     @staticmethod
@@ -822,7 +936,7 @@ class DefaultExcelRepository:
             return {"Conta": DefaultExcelRepository.SHEETS_MAP["Conta"]}
         elif anexo_number == 3:
             return {
-                key: DefaultExcelRepository.SHEETS_MAP[key] 
+                key: DefaultExcelRepository.SHEETS_MAP[key]
                 for key in ["Clima", "SistCC", "Eleva", "EqHoriz", "Ilum", "OtrosEq"]
             }
         elif anexo_number == 4:
@@ -849,7 +963,9 @@ class DefaultExcelRepository:
             except Exception:
                 pass
 
-    def _load_sheets(self, excel_path: Path, sheets_map: Dict[str, str]) -> Dict[str, pd.DataFrame]:
+    def _load_sheets(
+        self, excel_path: Path, sheets_map: Dict[str, str]
+    ) -> Dict[str, pd.DataFrame]:
         """Método genérico para cargar hojas específicas."""
         with pd.ExcelFile(excel_path) as xls:
             missing = [s for s in sheets_map if s not in xls.sheet_names]
@@ -880,13 +996,29 @@ class DefaultExcelRepository:
         return self._load_sheets(excel_path, sheets_map)
 
     @staticmethod
+    def _get_effective_group_column(
+        df: pd.DataFrame, preferred_col: str = "CENTRO"
+    ) -> str:
+        """Retorna la columna de agrupación efectiva, fallback a 'EDIFICIO' si no existe 'CENTRO'."""
+        if preferred_col in df.columns:
+            return preferred_col
+        elif "EDIFICIO" in df.columns:
+            return "EDIFICIO"
+        else:
+            # Si no existe ninguna de las dos, usar la primera columna disponible
+            return df.columns[0] if len(df.columns) > 0 else preferred_col
+
+    @staticmethod
     def extract_unique_groups(
         group_col: str, tables: Dict[str, pd.DataFrame]
     ) -> Sequence[str]:
         groups = set()
         for df in tables.values():
-            if group_col in df.columns:
-                values = df[group_col].dropna().unique()
+            effective_col = DefaultExcelRepository._get_effective_group_column(
+                df, group_col
+            )
+            if effective_col in df.columns:
+                values = df[effective_col].dropna().unique()
                 groups.update({str(v).strip() for v in values if str(v).strip()})
         return sorted(groups)
 
@@ -895,31 +1027,36 @@ class DefaultExcelRepository:
         group_col: str, tables: Dict[str, pd.DataFrame], group: str
     ) -> List[pd.DataFrame]:
         """Filtra tablas para Anexo 2 (solo Conta)."""
-        return [tables["Conta"][tables["Conta"].get(group_col) == group].copy()]
+        df_conta = tables["Conta"]
+        effective_col = DefaultExcelRepository._get_effective_group_column(
+            df_conta, group_col
+        )
+        return [df_conta[df_conta.get(effective_col) == group].copy()]
 
     @staticmethod
     def filter_tables_by_group_anexo3(
         group_col: str, tables: Dict[str, pd.DataFrame], group: str
     ) -> List[pd.DataFrame]:
         """Filtra tablas para Anexo 3."""
-        return [
-            df[df.get(group_col) == group].copy()
-            for df in (
-                tables["Clima"],
-                tables["SistCC"],
-                tables["Eleva"],
-                tables["EqHoriz"],
-                tables["Ilum"],
-                tables["OtrosEq"],
+        filtered_dfs = []
+        for table_name in ["Clima", "SistCC", "Eleva", "EqHoriz", "Ilum", "OtrosEq"]:
+            df = tables[table_name]
+            effective_col = DefaultExcelRepository._get_effective_group_column(
+                df, group_col
             )
-        ]
+            filtered_dfs.append(df[df.get(effective_col) == group].copy())
+        return filtered_dfs
 
     @staticmethod
     def filter_tables_by_group_anexo4(
         group_col: str, tables: Dict[str, pd.DataFrame], group: str
     ) -> List[pd.DataFrame]:
         """Filtra tablas para Anexo 4 (solo Envol)."""
-        return [tables["Envol"][tables["Envol"].get(group_col) == group].copy()]
+        df_envol = tables["Envol"]
+        effective_col = DefaultExcelRepository._get_effective_group_column(
+            df_envol, group_col
+        )
+        return [df_envol[df_envol.get(effective_col) == group].copy()]
 
     @staticmethod
     def filter_tables_by_group(
@@ -931,7 +1068,11 @@ class DefaultExcelRepository:
         filtered_dfs = []
         for key in ["Clima", "SistCC", "Eleva", "EqHoriz", "Ilum", "OtrosEq"]:
             if key in available_keys:
-                filtered_dfs.append(tables[key][tables[key].get(group_col) == group].copy())
+                df = tables[key]
+                effective_col = DefaultExcelRepository._get_effective_group_column(
+                    df, group_col
+                )
+                filtered_dfs.append(df[df.get(effective_col) == group].copy())
         return filtered_dfs
 
     @staticmethod
@@ -941,6 +1082,8 @@ class DefaultExcelRepository:
                 for _, row in dfg.iterrows():
                     if pd.notna(row.get("ID CENTRO")):
                         return str(row.get("ID CENTRO", ""))
+                    elif pd.notna(row.get("ID EDIFICIO")):
+                        return str(row.get("ID EDIFICIO", ""))
         return ""
 
     @staticmethod
@@ -956,7 +1099,8 @@ class DefaultExcelRepository:
         cols = [
             c for c in complete_df.columns[1:] if self._is_valid_total_col(c, last_row)
         ]
-        key_label = "CENTRO" if "CENTRO" in complete_df.columns else "EDIFICIO"
+        # Determinar la etiqueta apropiada basada en las columnas disponibles
+        key_label = self._get_effective_group_column(complete_df, "CENTRO")
         totals: Dict[str, str] = {key_label: "Total general"}
         for c in cols:
             nums = pd.to_numeric(df_group[c], errors="coerce").dropna()
@@ -1116,7 +1260,6 @@ class AnexoGenerator(Protocol):
 
 
 class Anexo3Generator:
-    
     anexo_number = 3
 
     def __init__(
@@ -1228,9 +1371,15 @@ class Anexo3Generator:
         self.word.close_word_processes()
 
         tables = self.excel.load_sheets_for_anexo3(excel_path)
-        centers = self.excel.extract_unique_groups(self.group_column, tables)
+
+        # Determinar la columna de agrupación efectiva usando la primera tabla disponible
+        first_table = next(iter(tables.values()))
+        effective_group_col = DefaultExcelRepository._get_effective_group_column(
+            first_table, self.group_column
+        )
+        centers = self.excel.extract_unique_groups(effective_group_col, tables)
         logger.info(
-            f"-> Se generarán documentos para {len(centers)} {self.group_column.lower()}s"
+            f"-> Se generarán documentos para {len(centers)} {effective_group_col.lower()}s"
         )
 
         tpl_bytes = self.templates.get_template(self.anexo_number)
@@ -1244,7 +1393,9 @@ class Anexo3Generator:
                 df_eqhoriz_grupo,
                 df_ilum_grupo,
                 df_otros_eq_grupo,
-            ) = self.excel.filter_tables_by_group_anexo3(self.group_column, tables, center)
+            ) = self.excel.filter_tables_by_group_anexo3(
+                effective_group_col, tables, center
+            )
 
             if all(
                 len(d) == 0
@@ -1384,7 +1535,12 @@ class Anexo2Generator:
 
         # Cargar solo la hoja Conta para Anexo 2
         tables = self.excel.load_sheets_for_anexo2(excel_path)
-        centers = self.excel.extract_unique_groups(self.group_column, tables)
+
+        # Determinar la columna de agrupación efectiva
+        effective_group_col = DefaultExcelRepository._get_effective_group_column(
+            tables["Conta"], self.group_column
+        )
+        centers = self.excel.extract_unique_groups(effective_group_col, tables)
         logger.info("* Datos cargados y limpiados\n-> Renderizando documentos…")
 
         tpl_bytes = self.templates.get_template(self.anexo_number)
@@ -1392,7 +1548,9 @@ class Anexo2Generator:
         generated_docs: List[str] = []
 
         for center in centers:
-            dfs = self.excel.filter_tables_by_group_anexo2(self.group_column, tables, center)
+            dfs = self.excel.filter_tables_by_group_anexo2(
+                effective_group_col, tables, center
+            )
             df_conta = dfs[0]
 
             if df_conta.empty:
@@ -1431,26 +1589,30 @@ class Anexo2Generator:
             pdf_files = self.pdf.convert_docx_to_pdf_bulk(generated_docs)
 
             if pdf_files:
-                logger.info(f"   ✓ Se generaron {len(pdf_files)} archivos PDF correctamente")
+                logger.info(
+                    f"   ✓ Se generaron {len(pdf_files)} archivos PDF correctamente"
+                )
 
                 logger.info("\nEliminando última página de los PDFs...")
                 self.pdf.remove_last_page_from_pdfs(pdf_files)
 
                 # Actualizar outputs con las rutas de PDF
-                pdf_dict = {str(Path(pdf).with_suffix(".docx")): Path(pdf) for pdf in pdf_files}
+                pdf_dict = {
+                    str(Path(pdf).with_suffix(".docx")): Path(pdf) for pdf in pdf_files
+                }
                 for output in outputs:
                     if str(output.docx_path) in pdf_dict:
                         outputs[outputs.index(output)] = OutputFile(
                             docx_path=output.docx_path,
-                            pdf_path=pdf_dict[str(output.docx_path)]
+                            pdf_path=pdf_dict[str(output.docx_path)],
                         )
             else:
                 logger.warning("   ! No se pudieron generar archivos PDF")
 
         return outputs
-    
+
+
 class Anexo4Generator:
-    
     anexo_number = 4
 
     def __init__(
@@ -1479,17 +1641,24 @@ class Anexo4Generator:
         self.word.close_word_processes()
 
         tables = self.excel.load_sheets_for_anexo4(excel_path)
-        centers = self.excel.extract_unique_groups(self.group_column, tables)
+
+        # Determinar la columna de agrupación efectiva
+        effective_group_col = DefaultExcelRepository._get_effective_group_column(
+            tables["Envol"], self.group_column
+        )
+        centers = self.excel.extract_unique_groups(effective_group_col, tables)
         logger.info(
-            f"-> Se generarán documentos para {len(centers)} {self.group_column.lower()}s"
+            f"-> Se generarán documentos para {len(centers)} {effective_group_col.lower()}s"
         )
         tpl_bytes = self.templates.get_template(self.anexo_number)
-        
+
         generated_docs: List[str] = []
         outputs: List[OutputFile] = []
-        
+
         for center in centers:
-            df_envol_grupo = self.excel.filter_tables_by_group_anexo4(self.group_column, tables, center)[0]
+            df_envol_grupo = self.excel.filter_tables_by_group_anexo4(
+                effective_group_col, tables, center
+            )[0]
 
             if df_envol_grupo.empty:
                 continue
@@ -1509,28 +1678,550 @@ class Anexo4Generator:
             doc = DocxTemplate(BytesIO(tpl_bytes))
             doc.render(ctx)
 
-            center_id = DefaultExcelRepository.extract_center_id(
-                [df_envol_grupo]
-            )
+            center_id = DefaultExcelRepository.extract_center_id([df_envol_grupo])
 
             safe_center = clean_name(str(center))
             out_name = f"Anexo 4 {safe_center}.docx"
             out_path = self.out.build_output_docx_path(CONFIG, center_id, out_name)  # type: ignore[name-defined]
             doc.save(str(out_path))
-            
+
             generated_docs.append(str(out_path))
             outputs.append(OutputFile(docx_path=out_path, pdf_path=None))
             logger.info(f"* Documento generado: {center_id}/{out_name}")
-            
+
         # Procesar conversión a PDF en lote después de actualizar campos
         logger.info("\nConvirtiendo documentos a PDF...")
         pdf_files = self.pdf.convert_docx_to_pdf_bulk(generated_docs)
 
         if pdf_files:
-            logger.info(f"   ✓ Se generaron {len(pdf_files)} archivos PDF correctamente")
-            
+            logger.info(
+                f"   ✓ Se generaron {len(pdf_files)} archivos PDF correctamente"
+            )
+
         return outputs
-            
+
+
+class Anexo6Generator:
+    """
+    Generador del Anexo 6 - Certificados Energéticos.
+
+    Genera un único PDF por edificio que contiene:
+    1) La plantilla Word del Anexo 6 convertida a PDF
+    2) Los PDFs de Certificados Energéticos del edificio en orden E1, E2, E3...
+    """
+
+    anexo_number = 6
+
+    def __init__(
+        self,
+        templates: TemplateProvider,
+        word: WordExporter,
+        pdf: PdfInspector,
+        certificates: CertificateRepository,
+        out: OutputPathBuilder,
+        cee_root: Optional[Path] = None,
+    ) -> None:
+        self.templates = templates
+        self.word = word
+        self.pdf = pdf
+        self.certificates = certificates
+        self.out = out
+        # Usar el directorio CEE proporcionado o el por defecto
+        self.cee_root = cee_root
+
+    def _extract_building_info(self, building_dir: Path) -> Tuple[str, str]:
+        """
+        Extrae información del edificio a partir del nombre de la carpeta.
+
+        Args:
+            building_dir: Directorio del edificio (formato esperado: Cxxxx_NOMBRE)
+
+        Returns:
+            Tupla (id_centro, nombre_limpio)
+        """
+        folder_name = building_dir.name
+
+        # Extraer ID CENTRO del formato Cxxxx_NOMBRE
+        id_match = re.match(r"^(C\d+)_", folder_name)
+        if id_match:
+            id_centro = id_match.group(1)
+            # Remover el patrón Cxxxx_ del nombre
+            nombre_limpio = re.sub(r"^C\d+_", "", folder_name)
+        else:
+            # Fallback si no coincide con el patrón esperado
+            id_centro = clean_name(folder_name)
+            nombre_limpio = folder_name
+
+        return id_centro, nombre_limpio
+
+    def _create_template_pdf(self, month_name: str, year: int, temp_dir: Path) -> Path:
+        """
+        Crea un PDF temporal de la plantilla con los campos mes y año rellenados.
+
+        Args:
+            month_name: Nombre del mes
+            year: Año
+            temp_dir: Directorio temporal donde guardar el PDF
+
+        Returns:
+            Path al PDF temporal creado
+        """
+        tpl_bytes = self.templates.get_template(self.anexo_number)
+
+        # Crear documento temporal con los campos rellenados
+        temp_docx = temp_dir / f"temp_anexo6_{year}_{month_name}.docx"
+        temp_pdf = temp_docx.with_suffix(".pdf")
+
+        try:
+            # Renderizar plantilla con mes y año
+            doc = DocxTemplate(BytesIO(tpl_bytes))
+            doc.render({"mes": month_name, "anio": year})
+            doc.save(str(temp_docx))
+
+            # Actualizar campos de Word
+            self.word.update_word_fields_bulk([str(temp_docx)])
+
+            # Convertir a PDF
+            app, word_doc = self.word.open_document(temp_docx, read_only=True)
+            try:
+                self.word.export_doc_to_pdf(word_doc, temp_pdf)
+            finally:
+                word_doc.Close(SaveChanges=False)
+                app.Quit()
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+            # Limpiar DOCX temporal
+            try:
+                temp_docx.unlink()
+            except Exception:
+                pass
+
+            return temp_pdf
+
+        except Exception as e:
+            # Limpiar archivos temporales en caso de error
+            for temp_file in [temp_docx, temp_pdf]:
+                try:
+                    if temp_file.exists():
+                        temp_file.unlink()
+                except Exception:
+                    pass
+            raise e
+
+    def _process_building(
+        self, building_dir: Path, template_pdf: Path
+    ) -> Optional[OutputFile]:
+        """
+        Procesa un edificio individual: busca certificados y genera el PDF combinado.
+
+        Args:
+            building_dir: Directorio del edificio
+            template_pdf: PDF de la plantilla ya generado
+
+        Returns:
+            OutputFile si se generó correctamente, None si no hay certificados
+        """
+        try:
+            # Buscar certificados en el edificio
+            certificates = self.certificates.find_certificates(building_dir)
+            if not certificates:
+                logger.warning(f"   ! {building_dir.name}: Sin certificados")
+                return None
+
+            # Extraer información del edificio
+            id_centro, nombre_limpio = self._extract_building_info(building_dir)
+            safe_name = clean_name(nombre_limpio)
+
+            # Crear archivo de salida
+            output_filename = f"Anexo 6 {safe_name}.pdf"
+            output_path = self.out.build_output_docx_path(
+                CONFIG,  # type: ignore[name-defined]
+                id_centro,
+                output_filename,
+            ).with_suffix(".pdf")
+
+            # Preparar lista de PDFs a unir (plantilla + certificados)
+            pdfs_to_merge = [template_pdf] + [
+                cert_path for _, cert_path in certificates
+            ]
+
+            # Unir PDFs
+            self.pdf.merge_pdfs(output_path, pdfs_to_merge)
+
+            logger.info(f"* Documento generado: {id_centro}/{output_filename}")
+            logger.info(f"   -> Certificados incluidos: {len(certificates)}")
+
+            return OutputFile(docx_path=output_path, pdf_path=output_path)
+
+        except Exception as e:
+            logger.error(f"   ! Error procesando {building_dir.name}: {e}")
+            return None
+
+    def generate(
+        self,
+        excel_path: Path,
+        config_month: Optional[str] = None,
+        config_year: Optional[int] = None,
+    ) -> List[OutputFile]:
+        """
+        Genera documentos Anexo 6 para todos los edificios encontrados.
+
+        Note: excel_path no se usa en Anexo 6, pero se mantiene para consistencia
+        con la interfaz AnexoGenerator.
+        """
+        month_name, year = request_month_and_year(config_month, config_year)
+        self.word.close_word_processes()
+
+        logger.info(f"-> Buscando edificios en: {self.cee_root}")
+
+        # Validar que existe el directorio de edificios
+        if not self.cee_root.exists():
+            raise FileNotFoundError(
+                f"No existe la carpeta de edificios: {self.cee_root}"
+            )
+
+        # Buscar directorios de edificios
+        building_dirs = sorted(
+            [d for d in self.cee_root.iterdir() if d.is_dir()],
+            key=lambda p: p.name.lower(),
+        )
+
+        if not building_dirs:
+            logger.warning("No se encontraron carpetas de edificios")
+            return []
+
+        logger.info(f"-> Se encontraron {len(building_dirs)} edificios")
+
+        # Crear directorio temporal
+        temp_dir = Path(__file__).resolve().parent / "temp_anexo_6"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        outputs: List[OutputFile] = []
+
+        try:
+            # Crear PDF de plantilla una sola vez (reutilizable)
+            logger.info("-> Preparando plantilla PDF...")
+            template_pdf = self._create_template_pdf(month_name, year, temp_dir)
+
+            # Procesar cada edificio
+            buildings_without_certs = []
+
+            for building_dir in building_dirs:
+                logger.info(f"-> Procesando edificio: {building_dir.name}")
+
+                result = self._process_building(building_dir, template_pdf)
+                if result:
+                    outputs.append(result)
+                else:
+                    buildings_without_certs.append(building_dir.name)
+
+            # Resumen final
+            logger.info(
+                f"\n-> Generados: {len(outputs)}/{len(building_dirs)} edificios"
+            )
+
+            if buildings_without_certs:
+                logger.warning("-> Edificios sin certificados:")
+                for building_name in buildings_without_certs:
+                    logger.warning(f"   - {building_name}")
+
+        except Exception as e:
+            logger.error(f"Error durante la generación: {e}")
+            raise
+
+        finally:
+            # Limpiar archivos temporales
+            try:
+                for temp_file in temp_dir.rglob("*"):
+                    if temp_file.is_file():
+                        temp_file.unlink()
+                temp_dir.rmdir()
+            except Exception as e:
+                logger.debug(f"Error limpiando archivos temporales: {e}")
+
+        return outputs
+
+
+# ---------------- Anexo 7 Generator ----------------
+
+
+class DefaultPlansRepository:
+    """Implementación del repositorio de planos."""
+
+    def find_plans(self, building_dir: Path) -> List[Tuple[int, Path]]:
+        """
+        Busca PDFs de PLANOS en la carpeta del edificio **y subcarpetas**.
+        Formato esperado (case-insensitive):
+            C{1234}_{A}_E{12}_{texto}.pdf
+          - {1234}: cualquier número
+          - {A}: una letra (cualquier letra)
+          - {12}: cualquier número (normalmente 00, 01, 02, ...)
+        Devuelve lista de tuplas (orden_E, ruta_pdf) ordenadas por E de menor a mayor.
+        """
+        plans: List[Tuple[int, Path]] = []
+
+        if not building_dir.exists() or not building_dir.is_dir():
+            return plans
+
+        # Regex flexible para el patrón indicado. Ejemplos válidos:
+        #   C0003_A_E00_PlantaBaja.pdf
+        #   c1234_b_e2_alzado.pdf
+        # Notas:
+        #   - Ignora mayúsculas/minúsculas
+        #   - Exige guiones bajos como en el patrón
+        PLANOS_RE = re.compile(r"(?i)^C\d+_[A-Z]_E(\d+)_.*\.pdf$")
+
+        for pdf_file in building_dir.rglob("*.pdf"):
+            if not pdf_file.is_file():
+                continue
+
+            match = PLANOS_RE.match(pdf_file.name)
+            if match:
+                orden = int(match.group(1))  # '00' -> 0, '01' -> 1, '12' -> 12
+                plans.append((orden, pdf_file))
+
+        # Ordenar por E (numérico) y por nombre para estabilidad
+        plans.sort(key=lambda x: (x[0], x[1].name.lower()))
+        return plans
+
+
+class Anexo7Generator:
+    """
+    Generador del Anexo 7 - Planos.
+
+    Genera un único PDF por edificio que contiene:
+    1) La plantilla Word del Anexo 7 convertida a PDF
+    2) Los PDFs de Planos del edificio en orden E0, E1, E2...
+    """
+
+    anexo_number = 7
+
+    def __init__(
+        self,
+        templates: TemplateProvider,
+        word: WordExporter,
+        pdf: PdfInspector,
+        plans: PlansRepository,
+        out: OutputPathBuilder,
+        plans_root: Optional[Path] = None,
+    ) -> None:
+        self.templates = templates
+        self.word = word
+        self.pdf = pdf
+        self.plans = plans
+        self.out = out
+        # Usar el directorio de planos proporcionado o el por defecto
+        self.plans_root = plans_root
+
+    def _extract_building_info(self, building_dir: Path) -> Tuple[str, str]:
+        """
+        Extrae información del edificio a partir del nombre de la carpeta.
+
+        Args:
+            building_dir: Directorio del edificio (formato esperado: Cxxxx_NOMBRE)
+
+        Returns:
+            Tupla (id_centro, nombre_limpio)
+        """
+        folder_name = building_dir.name
+
+        # Extraer ID CENTRO del formato Cxxxx_NOMBRE
+        id_match = re.match(r"^(C\d+)_", folder_name)
+        if id_match:
+            id_centro = id_match.group(1)
+            # Remover el patrón Cxxxx_ del nombre
+            nombre_limpio = re.sub(r"^C\d+_", "", folder_name)
+        else:
+            # Fallback si no coincide con el patrón esperado
+            id_centro = clean_name(folder_name)
+            nombre_limpio = folder_name
+
+        return id_centro, nombre_limpio
+
+    def _create_template_pdf(self, temp_dir: Path) -> Path:
+        """
+        Crea un PDF temporal de la plantilla sin campos dinámicos.
+
+        Args:
+            temp_dir: Directorio temporal donde guardar el PDF
+
+        Returns:
+            Path al PDF temporal creado
+        """
+        tpl_bytes = self.templates.get_template(self.anexo_number)
+
+        # Crear documento temporal
+        temp_docx = temp_dir / "temp_anexo7_plantilla.docx"
+        temp_pdf = temp_docx.with_suffix(".pdf")
+
+        try:
+            # Para Anexo 7, simplemente guardamos la plantilla tal como está
+            # (no tiene campos dinámicos como mes/año)
+            temp_docx.write_bytes(tpl_bytes)
+
+            # Convertir directamente a PDF usando Word COM
+            app, word_doc = self.word.open_document(temp_docx, read_only=True)
+            try:
+                self.word.export_doc_to_pdf(word_doc, temp_pdf)
+            finally:
+                word_doc.Close(SaveChanges=False)
+                app.Quit()
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+            # Limpiar DOCX temporal
+            try:
+                temp_docx.unlink()
+            except Exception:
+                pass
+
+            return temp_pdf
+
+        except Exception as e:
+            # Limpiar archivos temporales en caso de error
+            for temp_file in [temp_docx, temp_pdf]:
+                try:
+                    if temp_file.exists():
+                        temp_file.unlink()
+                except Exception:
+                    pass
+            raise e
+
+    def _process_building(
+        self, building_dir: Path, template_pdf: Path
+    ) -> Optional[OutputFile]:
+        """
+        Procesa un edificio individual: busca planos y genera el PDF combinado.
+
+        Args:
+            building_dir: Directorio del edificio
+            template_pdf: PDF de la plantilla ya generado
+
+        Returns:
+            OutputFile si se generó correctamente, None si no hay planos
+        """
+        try:
+            # Buscar planos en el edificio
+            plans = self.plans.find_plans(building_dir)
+            if not plans:
+                logger.warning(f"   ! {building_dir.name}: Sin planos")
+                return None
+
+            # Extraer información del edificio
+            id_centro, nombre_limpio = self._extract_building_info(building_dir)
+            safe_name = clean_name(nombre_limpio)
+
+            # Crear archivo de salida
+            output_filename = f"Anexo 7 {safe_name}.pdf"
+            output_path = self.out.build_output_docx_path(
+                CONFIG,  # type: ignore[name-defined]
+                id_centro,
+                output_filename,
+            ).with_suffix(".pdf")
+
+            # Preparar lista de PDFs a unir (plantilla + planos)
+            pdfs_to_merge = [template_pdf] + [plan_path for _, plan_path in plans]
+
+            # Unir PDFs
+            self.pdf.merge_pdfs(output_path, pdfs_to_merge)
+
+            logger.info(f"* Documento generado: {id_centro}/{output_filename}")
+            logger.info(f"   -> Planos incluidos: {len(plans)}")
+
+            return OutputFile(docx_path=output_path, pdf_path=output_path)
+
+        except Exception as e:
+            logger.error(f"   ! Error procesando {building_dir.name}: {e}")
+            return None
+
+    def generate(
+        self,
+        excel_path: Path,
+        config_month: Optional[str] = None,
+        config_year: Optional[int] = None,
+    ) -> List[OutputFile]:
+        """
+        Genera documentos Anexo 7 para todos los edificios encontrados.
+
+        Note: excel_path no se usa en Anexo 7, pero se mantiene para consistencia
+        con la interfaz AnexoGenerator.
+        Los parámetros config_month y config_year tampoco se usan en Anexo 7.
+        """
+        self.word.close_word_processes()
+
+        logger.info(f"-> Buscando edificios en: {self.plans_root}")
+
+        # Validar que existe el directorio de edificios
+        if not self.plans_root.exists():
+            raise FileNotFoundError(
+                f"No existe la carpeta de planos: {self.plans_root}"
+            )
+
+        # Buscar directorios de edificios
+        building_dirs = sorted(
+            [d for d in self.plans_root.iterdir() if d.is_dir()],
+            key=lambda p: p.name.lower(),
+        )
+
+        if not building_dirs:
+            logger.warning("No se encontraron carpetas de edificios")
+            return []
+
+        logger.info(f"-> Se encontraron {len(building_dirs)} edificios")
+
+        # Crear directorio temporal
+        temp_dir = Path(__file__).resolve().parent / "temp_anexo_7"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        outputs: List[OutputFile] = []
+
+        try:
+            # Crear PDF de plantilla una sola vez (reutilizable)
+            logger.info("-> Preparando plantilla PDF...")
+            template_pdf = self._create_template_pdf(temp_dir)
+
+            # Procesar cada edificio
+            buildings_without_plans = []
+
+            for building_dir in building_dirs:
+                logger.info(f"-> Procesando edificio: {building_dir.name}")
+
+                result = self._process_building(building_dir, template_pdf)
+                if result:
+                    outputs.append(result)
+                else:
+                    buildings_without_plans.append(building_dir.name)
+
+            # Resumen final
+            logger.info(
+                f"\n-> Generados: {len(outputs)}/{len(building_dirs)} edificios"
+            )
+
+            if buildings_without_plans:
+                logger.warning("-> Edificios sin planos:")
+                for building_name in buildings_without_plans:
+                    logger.warning(f"   - {building_name}")
+
+        except Exception as e:
+            logger.error(f"Error durante la generación: {e}")
+            raise
+
+        finally:
+            # Limpiar archivos temporales
+            try:
+                for temp_file in temp_dir.rglob("*"):
+                    if temp_file.is_file():
+                        temp_file.unlink()
+                temp_dir.rmdir()
+            except Exception as e:
+                logger.debug(f"Error limpiando archivos temporales: {e}")
+
+        return outputs
 
 
 # =====================================================================================
@@ -1548,12 +2239,16 @@ class AnexoFactory:
         pdf: PdfInspector,
         excel: ExcelRepository,
         out: OutputPathBuilder,
+        cee_dir: Optional[Path] = None,
+        plans_dir: Optional[Path] = None,
     ) -> None:
         self._templates = templates
         self._word = word
         self._pdf = pdf
         self._excel = excel
         self._out = out
+        self._cee_dir = cee_dir
+        self._plans_dir = plans_dir
 
     def get(self, n: int) -> AnexoGenerator:
         if n == 3:
@@ -1561,11 +2256,34 @@ class AnexoFactory:
                 self._templates, self._word, self._pdf, self._excel, self._out
             )
         if n == 2:
-            return Anexo2Generator(self._templates, self._word, self._pdf, self._excel, self._out)
+            return Anexo2Generator(
+                self._templates, self._word, self._pdf, self._excel, self._out
+            )
         if n == 4:
-            return Anexo4Generator(self._templates, self._word, self._pdf, self._excel, self._out)
+            return Anexo4Generator(
+                self._templates, self._word, self._pdf, self._excel, self._out
+            )
+        if n == 6:
+            certificates = DefaultCertificateRepository()
+            return Anexo6Generator(
+                self._templates,
+                self._word,
+                self._pdf,
+                certificates,
+                self._out,
+                self._cee_dir,
+            )
+        if n == 7:
+            plans = DefaultPlansRepository()
+            return Anexo7Generator(
+                self._templates,
+                self._word,
+                self._pdf,
+                plans,
+                self._out,
+                self._plans_dir,
+            )
         raise NotImplementedError(f"Generador para Anexo {n} no implementado")
-
 
 
 def run_application(config: RunConfig) -> int:
@@ -1578,7 +2296,9 @@ def run_application(config: RunConfig) -> int:
     pdf = DefaultPdfInspector()
     excel = DefaultExcelRepository()
     out = DefaultOutputPathBuilder()
-    factory = AnexoFactory(templates, word, pdf, excel, out)
+    factory = AnexoFactory(
+        templates, word, pdf, excel, out, config.cee_dir, config.plans_dir
+    )
 
     # Validaciones mínimas (la GUI ya valida en capa anterior)
     if not config.excel_dir.is_dir():
@@ -1589,12 +2309,9 @@ def run_application(config: RunConfig) -> int:
         for p in config.excel_dir.iterdir()
         if p.suffix.lower() in (".xlsx", ".xlsm", ".xls")
     ]
-    if not excel_files:
-        logger.error("La carpeta de Excel no contiene archivos .xls/.xlsx/.xlsm.")
-        return 2
 
     # Modo ejecución
-    implemented = [2, 3]
+    implemented = [2, 3, 4, 6, 7]
     try:
         if config.mode == "all":
             target_anexos = implemented
@@ -1608,23 +2325,75 @@ def run_application(config: RunConfig) -> int:
         logger.error(f"Error interpretando modo/anexo: {e}")
         return 2
 
-    # Procesar cada Excel encontrado
-    for xfile in excel_files:
-        logger.info(f"\n=== Procesando: {xfile.name} ===")
-        for n in target_anexos:
+    # Validaciones específicas por anexo
+    for n in target_anexos:
+        if n == 6:
+            # Para Anexo 6, validar que existe la carpeta CEE
+            cee_dir = config.cee_dir or (Path(__file__).resolve().parent.parent / "CEE")
+            if not cee_dir.exists():
+                logger.error(f"Para el Anexo 6 se requiere la carpeta CEE: {cee_dir}")
+                return 2
+        elif n == 7:
+            # Para Anexo 7, validar que existe la carpeta de planos
+            plans_dir = config.plans_dir or (
+                Path(__file__).resolve().parent.parent / "PLANOS"
+            )
+            if not plans_dir.exists():
+                logger.error(
+                    f"Para el Anexo 7 se requiere la carpeta de planos: {plans_dir}"
+                )
+                return 2
+
+    # Separar anexos que requieren Excel de los que no
+    excel_dependent_anexos = [n for n in target_anexos if n not in (6, 7)]
+    excel_independent_anexos = [n for n in target_anexos if n in (6, 7)]
+
+    # Validar que hay archivos Excel solo si hay anexos que los requieren
+    if excel_dependent_anexos and not excel_files:
+        logger.error("La carpeta de Excel no contiene archivos .xls/.xlsx/.xlsm.")
+        return 2
+
+    # Procesar anexos que NO requieren Excel (6 y 7) - ejecutar solo una vez
+    if excel_independent_anexos:
+        logger.info(
+            f"\n=== Procesando anexos independientes de Excel: {excel_independent_anexos} ==="
+        )
+        # Usar un archivo Excel dummy o None - el generador lo ignorará
+        dummy_excel = Path("dummy.xlsx")  # Path ficticio que nunca se usará
+
+        for n in excel_independent_anexos:
             try:
                 generator = factory.get(n)
             except NotImplementedError as e:
                 logger.warning(str(e))
                 continue
             try:
-                generator.generate(xfile, config.month, config.year)
+                generator.generate(dummy_excel, config.month, config.year)
             except FileNotFoundError as e:
                 logger.error(str(e))
                 return 3
             except Exception as e:
                 logger.error(f"Error generando Anexo {n}: {e}")
-                # seguir con otros anexos/archivos
+                # seguir con otros anexos
+
+    # Procesar anexos que SÍ requieren Excel (2, 3, 4) - ejecutar para cada Excel
+    if excel_dependent_anexos:
+        for xfile in excel_files:
+            logger.info(f"\n=== Procesando: {xfile.name} ===")
+            for n in excel_dependent_anexos:
+                try:
+                    generator = factory.get(n)
+                except NotImplementedError as e:
+                    logger.warning(str(e))
+                    continue
+                try:
+                    generator.generate(xfile, config.month, config.year)
+                except FileNotFoundError as e:
+                    logger.error(str(e))
+                    return 3
+                except Exception as e:
+                    logger.error(f"Error generando Anexo {n}: {e}")
+                    # seguir con otros anexos/archivos
 
     logger.info("\n--- Proceso finalizado correctamente ---")
     return 0
@@ -1674,6 +2443,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
         "--output-dir",
         help="Carpeta de salida para anexos. Si no se indica, se usa ./word/anexos",
     )
+    parser.add_argument(
+        "--cee-dir",
+        help="Carpeta de certificados energéticos (CEE) para el Anexo 6",
+    )
+    parser.add_argument(
+        "--plans-dir",
+        help="Carpeta de planos para el Anexo 7",
+    )
 
     ns = parser.parse_args(argv)
 
@@ -1690,6 +2467,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
         html_templates_dir=_p(ns.html_templates_dir),
         photos_dir=_p(ns.photos_dir),
         output_dir=_p(ns.output_dir),
+        cee_dir=_p(ns.cee_dir),
+        plans_dir=_p(ns.plans_dir),
     )
 
 
