@@ -96,6 +96,8 @@ class RunConfig:
     output_dir: Optional[Path] = None
     cee_dir: Optional[Path] = None  # carpeta de certificados energéticos
     plans_dir: Optional[Path] = None  # carpeta de planos
+    center: Optional[str] = None  # Cxxxx para filtrar un único centro
+    centers: Optional[str] = None  # rango/lista p.ej. "C0001-C0010" o "C0001, C0010"
 
 
 @dataclass(frozen=True)
@@ -1149,6 +1151,69 @@ def clean_name(filename: str) -> str:
     return cleaned[:100].strip()
 
 
+def normalize_center_id(s: Optional[str]) -> Optional[str]:
+    """Normaliza IDs tipo Cxxxx a mayúsculas y 4 dígitos. Acepta C1, C016, c0016 -> C0016."""
+    if not s:
+        return None
+    s = str(s).strip().upper()
+    m = re.match(r"^C(\d{1,4})$", s)
+    if not m:
+        return None
+    return f"C{int(m.group(1)):04d}"
+
+def parse_centers_expr(expr: Optional[str]) -> Optional[set[str]]:
+    """Parsea una expresión de centros.
+    - "C0001-C0010" → {C0001..C0010}
+    - "C0001, C0010, C0013" → {C0001, C0010, C0013}
+    - Mezclas como "C0001-C0003, C0010" también son válidas.
+    Devuelve *None* si la expresión está vacía o no contiene centros válidos.
+    """
+    if not expr:
+        return None
+    s = expr.strip()
+    if not s:
+        return None
+
+    out: set[str] = set()
+    parts = [p.strip() for p in s.split(',')] if ',' in s else [s]
+    for part in parts:
+        if not part:
+            continue
+        if '-' in part:
+            a, b = [x.strip() for x in part.split('-', 1)]
+            a_id = normalize_center_id(a)
+            b_id = normalize_center_id(b)
+            if not a_id or not b_id:
+                # intenta permitir "C0001-10" → "C0010"
+                if a_id and b and b.isdigit():
+                    b_id = f"C{int(b):04d}"
+                else:
+                    continue
+            a_num, b_num = int(a_id[1:]), int(b_id[1:])
+            if a_num > b_num:
+                a_num, b_num = b_num, a_num
+            for n in range(a_num, b_num + 1):
+                out.add(f"C{n:04d}")
+        else:
+            cid = normalize_center_id(part)
+            if cid:
+                out.add(cid)
+    return out or None
+
+
+def get_target_centers_from_config(cfg) -> Optional[set[str]]:
+    """Obtiene el conjunto de centros objetivo a partir de la config.
+    Prioridad: --centers > --center.
+    """
+    centers_expr = getattr(cfg, "centers", None)
+    targets = parse_centers_expr(centers_expr) if centers_expr else None
+    if not targets:
+        one = normalize_center_id(getattr(cfg, "center", None))
+        if one:
+            targets = {one}
+    return targets
+
+
 def request_month_and_year(
     config_month: Optional[str] = None,
     config_year: Optional[int] = None,
@@ -1410,6 +1475,15 @@ class Anexo3Generator:
             ):
                 continue
 
+            targets = get_target_centers_from_config(CONFIG)
+            center_id = DefaultExcelRepository.extract_center_id([
+                df_clima_grupo, df_sist_cc_grupo, df_eleva_grupo,
+                df_eqhoriz_grupo, df_ilum_grupo, df_otros_eq_grupo
+            ])
+            targets = get_target_centers_from_config(CONFIG)  # type: ignore[name-defined]
+            if targets and normalize_center_id(center_id) not in targets:
+                continue
+
             totales_clima = self.excel.calculate_totals_by_center(
                 tables["Clima"], df_clima_grupo
             )
@@ -1553,6 +1627,12 @@ class Anexo2Generator:
             )
             df_conta = dfs[0]
 
+            targets = get_target_centers_from_config(CONFIG)
+            center_id = self.excel.extract_center_id(dfs)
+            targets = get_target_centers_from_config(CONFIG)  # type: ignore[name-defined]
+            if targets and normalize_center_id(center_id) not in targets:
+                continue
+
             if df_conta.empty:
                 continue
 
@@ -1661,6 +1741,12 @@ class Anexo4Generator:
             )[0]
 
             if df_envol_grupo.empty:
+                continue
+
+            targets = get_target_centers_from_config(CONFIG)
+            center_id = DefaultExcelRepository.extract_center_id([df_envol_grupo])
+            targets = get_target_centers_from_config(CONFIG)  # type: ignore[name-defined]
+            if targets and normalize_center_id(center_id) not in targets:
                 continue
 
             totales_envol = self.excel.calculate_totals_by_center(
@@ -1888,6 +1974,10 @@ class Anexo6Generator:
             [d for d in self.cee_root.iterdir() if d.is_dir()],
             key=lambda p: p.name.lower(),
         )
+
+        targets = get_target_centers_from_config(CONFIG)
+        if targets:
+            building_dirs = [d for d in building_dirs if normalize_center_id(self._extract_building_info(d)[0]) in targets]
 
         if not building_dirs:
             logger.warning("No se encontraron carpetas de edificios")
@@ -2167,6 +2257,10 @@ class Anexo7Generator:
             [d for d in self.plans_root.iterdir() if d.is_dir()],
             key=lambda p: p.name.lower(),
         )
+
+        targets = get_target_centers_from_config(CONFIG)
+        if targets:
+            building_dirs = [d for d in building_dirs if normalize_center_id(self._extract_building_info(d)[0]) in targets]
 
         if not building_dirs:
             logger.warning("No se encontraron carpetas de edificios")
@@ -2452,6 +2546,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
         help="Carpeta de planos para el Anexo 7",
     )
 
+    parser.add_argument(
+        "--center",
+        help="ID de centro para generar solo ese centro (formato Cxxxx, p.ej. C0016)"
+    )
+    parser.add_argument(
+        "--centers",
+        help="Expresión de centros: rango C0001-C0010 y/o lista C0001, C0010, C0013"
+    )
+
+
     ns = parser.parse_args(argv)
 
     def _p(x: Optional[str]) -> Optional[Path]:  # helper
@@ -2469,6 +2573,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
         output_dir=_p(ns.output_dir),
         cee_dir=_p(ns.cee_dir),
         plans_dir=_p(ns.plans_dir),
+        center=ns.center,
+        centers=ns.centers,
+        
     )
 
 

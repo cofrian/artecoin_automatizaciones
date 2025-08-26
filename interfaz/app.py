@@ -49,17 +49,25 @@ ANEXO_CHOICES = [2, 3, 4, 5, 6, 7]
 @dataclass(frozen=True)
 class RunOptions:
     """Opciones de ejecución para 'anexos_creator'."""
-    excel_dir: str                      # OBLIGATORIO
-    word_dir: Optional[str]             # opcional
-    mode: str                           # "all" | "single"
-    anexo: Optional[int]                # 2..7 cuando mode == "single"
-    html_templates_dir: Optional[str]   # opcional
-    photos_dir: Optional[str]           # opcional
-    output_dir: Optional[str]           # opcional
-    cee_dir: Optional[str]              # opcional (carpeta CEE)
-    plans_dir: Optional[str]            # opcional (carpeta de planos)
-    month: Optional[int]                # opcional (1..12)
-    year: Optional[int]                 # opcional (YYYY)
+    # Rutas base
+    excel_dir: str
+    word_dir: Optional[str]
+    output_dir: Optional[str]
+    html_templates_dir: Optional[str]
+    photos_dir: Optional[str]
+    cee_dir: Optional[str]
+    plans_dir: Optional[str]
+
+    # Modo de ejecución
+    mode: str                  # "all" | "single"
+    anexo: Optional[int]       # 2..7 si mode == "single"
+
+    # Parámetros fecha
+    month: Optional[int]
+    year: Optional[int]
+
+    # Expresión de centros: "C0001-C0010" o "C0001, C0010"
+    center: Optional[str] = None
 
 
 # ---------------------------
@@ -199,13 +207,17 @@ class ProcessRunner:
 
         base_cmd, _ = self._find_target()
 
-        cmd = list(base_cmd)
+        # Construcción del comando
+        cmd: list[str] = list(base_cmd)
         cmd += ["--excel-dir", opts.excel_dir]
+
         if opts.word_dir:
             cmd += ["--word-dir", opts.word_dir]
+
         if opts.mode == "all":
             cmd += ["--mode", "all"]
         else:
+            # anexo concreto
             cmd += ["--mode", "single", "--anexo", str(opts.anexo)]
 
         # Flags opcionales (sin duplicados)
@@ -226,28 +238,41 @@ class ProcessRunner:
         if opts.year is not None:
             cmd += ["--year", str(opts.year)]
 
+        # ⬅️ IMPORTANTE: pasar la expresión de centros solo si el usuario eligió "Solo centro(s)"
+        if getattr(opts, "center", None):
+            cmd += ["--centers", str(opts.center)]
+
+        # Log del comando para depuración (visible en la consola de la app)
+        try:
+            self._log_queue.put("CMD: " + " ".join(cmd))
+        except Exception:
+            pass
+
+        # Windows: ocultar consola si aplica
         creationflags = 0
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+        # Forzar UTF-8
         env_utf8 = dict(os.environ)
         env_utf8.setdefault("PYTHONIOENCODING", "utf-8")
-        env_utf8.setdefault("PYTHONUTF8", "1")
 
+        # Lanzar proceso
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,          # permite input() desde la GUI
+            stdin=subprocess.PIPE,        # permite input() desde la GUI si el script lo pide
             text=True,
-            encoding="utf-8",               # fuerza decodificación UTF-8
-            errors="replace",               # evita errores por caracteres inesperados
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             universal_newlines=True,
             creationflags=creationflags,
             env=env_utf8,
         )
 
+        # Hilo lector de logs
         def _reader() -> None:
             assert self._proc is not None
             for line in self._proc.stdout:  # type: ignore[union-attr]
@@ -257,6 +282,7 @@ class ProcessRunner:
 
         self._reader_thread = threading.Thread(target=_reader, daemon=True)
         self._reader_thread.start()
+
 
     def send_input(self, text: str) -> bool:
         """Envía una línea al stdin del proceso (para manejar input())."""
@@ -332,6 +358,8 @@ class AnexosApp(ctk.CTk):
         now = datetime.now()
         self.month_var = StringVar(value=str(now.month).zfill(2))
         self.year_var = IntVar(value=now.year)
+        self.center_mode = ctk.StringVar(value="all")   # "all" | "one"
+        self.center_value = ctk.StringVar(value="")     # "C0001-C0010" o "C0001, C0010"    
 
     # ----- UI -----
 
@@ -436,6 +464,32 @@ class AnexosApp(ctk.CTk):
         self.combo_year.grid(row=1, column=3, sticky="w", padx=10, pady=(0, 10))
 
         opts_frame.grid_columnconfigure(2, weight=1)
+        
+        # Ámbito de centros
+        ctk.CTkLabel(opts_frame, text="Ámbito de centros:", font=font_label)\
+            .grid(row=2, column=0, sticky="w", padx=10, pady=(10, 10))
+
+        self.radio_centers_all = ctk.CTkRadioButton(
+            opts_frame, text="Todos", variable=self.center_mode, value="all",
+            command=self._on_center_mode_change, font=font_label
+        )
+        self.radio_centers_one = ctk.CTkRadioButton(
+            opts_frame, text="Solo centro(s):", variable=self.center_mode, value="one",
+            command=self._on_center_mode_change, font=font_label
+        )
+
+        self.radio_centers_all.grid(row=2, column=1, sticky="w", padx=10, pady=(10, 10))
+        self.radio_centers_one.grid(row=2, column=2, sticky="w", padx=10, pady=(10, 10))
+
+        self.entry_center = ctk.CTkEntry(
+            opts_frame,
+            textvariable=self.center_value,
+            width=240,
+            height=38,
+            placeholder_text="C0001-C0010 o C0001, C0010"
+        )
+        self.entry_center.grid(row=2, column=3, sticky="w", padx=10, pady=(10, 10))
+        self.entry_center.configure(state="disabled")
 
         # Botonera
         btn_frame = ctk.CTkFrame(self)
@@ -451,21 +505,23 @@ class AnexosApp(ctk.CTk):
         self.btn_exit.pack(side="right", padx=8, pady=12)
 
         # Logs
-        ctk.CTkLabel(self, text="Logs:", font=ctk.CTkFont(size=15, weight="bold")).pack(**pad, anchor="w")
+        ctk.CTkLabel(self, text="Historial de ejecución:", font=ctk.CTkFont(size=15, weight="bold")).pack(**pad, anchor="w")
         self.txt_logs = ctk.CTkTextbox(self, height=360, font=font_log)
         self.txt_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
         self._log("Listo. Configura las carpetas y el modo, luego pulsa 'Ejecutar'.")
 
-        # Ayuda
-        hint = ctk.CTkLabel(
-            self,
-            text=("Sugerencia: Mes y año son opcionales si el proceso los pide con input(). "
-                  "Las carpetas CEE y Planos son opcionales y solo se añaden si tu backend las acepta."),
-            font=ctk.CTkFont(size=12),
-            justify="left"
-        )
-        hint.pack(padx=14, pady=(0, 10), anchor="w")
-
+    def _on_center_mode_change(self) -> None:
+        """Habilita/deshabilita el input de centros según el radio."""
+        if self.center_mode.get() == "one":
+            self.entry_center.configure(state="normal")
+            try:
+                self.entry_center.focus()
+            except Exception:
+                pass
+        else:
+            self.entry_center.configure(state="disabled")
+            self.center_value.set("")
+    
     # ----- helpers UI -----
 
     def _log(self, text: str) -> None:
@@ -526,6 +582,9 @@ class AnexosApp(ctk.CTk):
 
     def _apply_saved_config(self) -> None:
         cfg = ConfigStore.load()
+        self.center_mode.set(cfg.get("centers_mode", cfg.get("center_mode", "all")))
+        self.center_value.set(cfg.get("centers", cfg.get("center", "")))
+        self._on_center_mode_change()
         self.excel_dir.set(cfg.get("excel_dir", ""))
         self.word_dir.set(cfg.get("word_dir", ""))
         self.html_templates_dir.set(cfg.get("html_templates_dir", ""))
@@ -570,21 +629,57 @@ class AnexosApp(ctk.CTk):
     # ----- eventos -----
 
     def _collect_options(self) -> RunOptions:
-        mode = self.mode_var.get()
-        anexo = self.anexo_value.get() if mode == "single" else None
+        """
+        Empaqueta los valores de la UI en un RunOptions.
+        Limpia strings vacíos -> None y convierte mes/año/anexo a int cuando procede.
+        """
+
+        def _clean(s: object) -> str | None:
+            if s is None:
+                return None
+            s = str(s).strip()
+            return s or None
+
+        def _to_int(v: object) -> int | None:
+            try:
+                s = str(v).strip()
+                if not s:
+                    return None
+                return int(s)
+            except Exception:
+                return None
+
+        # ⚠️ Usa mode_var (no existe radio_mode_single)
+        mode = "single" if self.mode_var.get() == "single" else "all"
+
+        # Expresión de centros (rango/lista) solo si el usuario selecciona "Solo centro(s)"
+        center_expr = None
+        if self.center_mode.get() == "one":
+            center_expr = _clean(self.center_value.get())
+
         return RunOptions(
-            excel_dir=self.excel_dir.get().strip(),
-            word_dir=(self.word_dir.get().strip() or None),
+            # Rutas base
+            excel_dir=(self.excel_dir.get() or "").strip(),   # obligatorio
+            word_dir=_clean(self.word_dir.get()),
+            output_dir=_clean(self.output_dir.get()),
+            html_templates_dir=_clean(self.html_templates_dir.get()),
+            photos_dir=_clean(self.photos_dir.get()),
+            cee_dir=_clean(self.cee_dir.get()),
+            plans_dir=_clean(self.plans_dir.get()),
+
+            # Ejecución  ⚠️ Usa anexo_value (no existe anexo_var)
             mode=mode,
-            anexo=anexo,
-            html_templates_dir=(self.html_templates_dir.get().strip() or None),
-            photos_dir=(self.photos_dir.get().strip() or None),
-            output_dir=(self.output_dir.get().strip() or None),
-            cee_dir=(self.cee_dir.get().strip() or None),
-            plans_dir=(self.plans_dir.get().strip() or None),
-            month=int(self.month_var.get()),
-            year=int(self.year_var.get()),
+            anexo=_to_int(self.anexo_value.get()) if mode == "single" else None,
+
+            # Fecha
+            month=_to_int(self.month_var.get()),
+            year=_to_int(self.year_var.get()),
+
+            # Centros
+            center=center_expr,
         )
+
+
 
     def _ensure_output_dir(self, output_dir: Optional[str]) -> bool:
         """Si se ha indicado carpeta de salida y no existe, propone crearla."""
@@ -626,6 +721,8 @@ class AnexosApp(ctk.CTk):
             "plans_dir": opts.plans_dir or "",
             "month": int(self.month_var.get()),
             "year": int(self.year_var.get()),
+            "centers_mode": self.center_mode.get(),
+            "centers": self.center_value.get().strip() if self.center_mode.get() == "one" else ""
         })
 
         # Avisos no intrusivos
