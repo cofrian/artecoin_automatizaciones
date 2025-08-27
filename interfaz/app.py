@@ -1,20 +1,23 @@
+# -*- coding: utf-8 -*-
 """
 GUI (customtkinter) para ejecutar 'anexos_creator.py' o 'anexos_creator.exe' sin usar la terminal.
 
-NOVEDADES:
-- Campos opcionales: carpeta de plantillas HTML, carpeta de fotos, carpeta de CEE y carpeta de planos.
-- Campo opcional: carpeta de salida para los anexos generados (si no existe, se propone crearla).
-- Mantiene: soporte stdin para input() del subproceso, logs en tiempo real, cancelación segura y persistencia de configuración.
+NOVEDADES (esta versión):
+- Pestaña "Mover anexos al NAS": permite mover los DOCX/PDF locales organizados por centro (Cxxxx)
+  a la carpeta de centros del NAS (las típicas 01_Cxxxx_* o 02_Cxxxx_*), bajo la subcarpeta "ANEJOS".
+- Validación básica de rutas y opción "Simular (dry-run)".
+- Filtro opcional de centros (rango/lista: C0001-C0010, C0003, C0011).
+
+Se mantiene:
+- Pestaña "Generación de Anejos" (creación de anexos 2..7).
+- Logs en tiempo real, cancelación segura y persistencia de configuración.
 
 Arquitectura (SRP / SOLID):
-- RunOptions (dataclass) modela la configuración de ejecución.
+- RunOptions / MoveOptions (dataclasses) modelan las opciones.
 - Validator valida entradas (sin efectos colaterales).
 - ConfigStore persiste/restaura ajustes del usuario.
-- ProcessRunner aísla la estrategia de ejecución y E/S del subproceso (stdout/err, stdin).
-- AnexosApp orquesta la UI, estados y flujos de usuario.
-
-Requisitos:
-    pip install customtkinter
+- ProcessRunner aísla la ejecución de 'anexos_creator' (stdout/err + stdin).
+- AnexosApp orquesta la UI.
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ ANEXO_CHOICES = [2, 3, 4, 5, 6, 7]
 
 @dataclass(frozen=True)
 class RunOptions:
-    """Opciones de ejecución para 'anexos_creator'."""
+    """Opciones de ejecución para 'anexos_creator' (acción: generate)."""
     # Rutas base
     excel_dir: str
     word_dir: Optional[str]
@@ -66,8 +69,17 @@ class RunOptions:
     month: Optional[int]
     year: Optional[int]
 
-    # Expresión de centros: "C0001-C0010" o "C0001, C0010"
+    # Expresión de centros (rango/lista)
     center: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MoveOptions:
+    """Opciones de movimiento de anexos al NAS (acción: move-to-nas)."""
+    local_out_root: str          # Carpeta local con subcarpetas Cxxxx (o Cxxxx/anexos)
+    nas_centers_dir: str         # Carpeta del NAS con 01_Cxxxx_* / 02_Cxxxx_*
+    centers_expr: Optional[str]  # Filtro opcional de centros
+    dry_run: bool                # True: solo simula (no mueve)
 
 
 # ---------------------------
@@ -153,6 +165,14 @@ class Validator:
         # output_dir es opcional: si no existe lo gestionamos en la capa de UI (preguntando si crear)
         return True, ""
 
+    @staticmethod
+    def validate_move_options(opts: MoveOptions) -> Tuple[bool, str]:
+        if not opts.local_out_root or not os.path.isdir(opts.local_out_root):
+            return False, "Selecciona una carpeta local (raíz de anexos por centro) válida."
+        if not opts.nas_centers_dir or not os.path.isdir(opts.nas_centers_dir):
+            return False, "Selecciona una carpeta del NAS válida (la que contiene 01_Cxxxx_* / 02_Cxxxx_*)."
+        return True, ""
+
 
 # ---------------------------
 # Ejecutor del proceso (subprocess)
@@ -186,12 +206,8 @@ class ProcessRunner:
         candidates = [
             (os.path.join(base_dir, "anexos_creator.exe"), True),
             (os.path.join(base_dir, "anexos_creator.py"), False),
-            (os.path.join(base_dir, "anexos_creator_refactor_v3.exe"), True),
-            (os.path.join(base_dir, "anexos_creator_refactor_v3.py"), False),
             (os.path.abspath("anexos_creator.exe"), True),
             (os.path.abspath("anexos_creator.py"), False),
-            (os.path.abspath("anexos_creator_refactor_v3.exe"), True),
-            (os.path.abspath("anexos_creator_refactor_v3.py"), False),
         ]
         for path, is_exe in candidates:
             if os.path.isfile(path):
@@ -201,14 +217,53 @@ class ProcessRunner:
             "Colócalo en la misma carpeta que esta aplicación."
         )
 
+    def _launch(self, cmd: List[str]) -> None:
+        # Log del comando para depuración
+        try:
+            self._log_queue.put("CMD: " + " ".join(cmd))
+        except Exception:
+            pass
+
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        # Forzar UTF-8
+        env_utf8 = dict(os.environ)
+        env_utf8.setdefault("PYTHONIOENCODING", "utf-8")
+
+        self._proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            universal_newlines=True,
+            creationflags=creationflags,
+            env=env_utf8,
+        )
+
+        def _reader() -> None:
+            assert self._proc is not None
+            for line in self._proc.stdout:  # type: ignore[union-attr]
+                self._log_queue.put(line.rstrip("\n"))
+            self._proc.wait()
+            self._log_queue.put(f"--- Proceso finalizado. Código: {self._proc.returncode} ---")
+
+        self._reader_thread = threading.Thread(target=_reader, daemon=True)
+        self._reader_thread.start()
+
+    # Acción: GENERATE
     def start(self, opts: RunOptions) -> None:
         if self.is_running():
             raise RuntimeError("Ya hay un proceso en ejecución.")
-
         base_cmd, _ = self._find_target()
 
-        # Construcción del comando
         cmd: list[str] = list(base_cmd)
+        cmd += ["--action", "generate"]
         cmd += ["--excel-dir", opts.excel_dir]
 
         if opts.word_dir:
@@ -217,10 +272,8 @@ class ProcessRunner:
         if opts.mode == "all":
             cmd += ["--mode", "all"]
         else:
-            # anexo concreto
             cmd += ["--mode", "single", "--anexo", str(opts.anexo)]
 
-        # Flags opcionales (sin duplicados)
         if opts.html_templates_dir:
             cmd += ["--html-templates-dir", opts.html_templates_dir]
         if opts.photos_dir:
@@ -232,57 +285,32 @@ class ProcessRunner:
         if opts.plans_dir:
             cmd += ["--plans-dir", opts.plans_dir]
 
-        # Mes y año para evitar input() interactivo
         if opts.month is not None:
             cmd += ["--month", str(opts.month)]
         if opts.year is not None:
             cmd += ["--year", str(opts.year)]
 
-        # ⬅️ IMPORTANTE: pasar la expresión de centros solo si el usuario eligió "Solo centro(s)"
         if getattr(opts, "center", None):
-            cmd += ["--center", str(opts.center)]
+            cmd += ["--centers", str(opts.center)]
 
-        # Log del comando para depuración (visible en la consola de la app)
-        try:
-            self._log_queue.put("CMD: " + " ".join(cmd))
-        except Exception:
-            pass
+        self._launch(cmd)
 
-        # Windows: ocultar consola si aplica
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # Acción: MOVE-TO-NAS
+    def start_move(self, opts: MoveOptions) -> None:
+        if self.is_running():
+            raise RuntimeError("Ya hay un proceso en ejecución.")
+        base_cmd, _ = self._find_target()
 
-        # Forzar UTF-8
-        env_utf8 = dict(os.environ)
-        env_utf8.setdefault("PYTHONIOENCODING", "utf-8")
+        cmd: list[str] = list(base_cmd)
+        cmd += ["--action", "move-to-nas"]
+        cmd += ["--local-out-root", opts.local_out_root]
+        cmd += ["--nas-centers-dir", opts.nas_centers_dir]
+        if opts.centers_expr:
+            cmd += ["--centers", opts.centers_expr]
+        if opts.dry_run:
+            cmd += ["--dry-run"]
 
-        # Lanzar proceso
-        self._proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,        # permite input() desde la GUI si el script lo pide
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            universal_newlines=True,
-            creationflags=creationflags,
-            env=env_utf8,
-        )
-
-        # Hilo lector de logs
-        def _reader() -> None:
-            assert self._proc is not None
-            for line in self._proc.stdout:  # type: ignore[union-attr]
-                self._log_queue.put(line.rstrip("\n"))
-            self._proc.wait()
-            self._log_queue.put(f"\n--- Proceso finalizado. Código: {self._proc.returncode} ---")
-
-        self._reader_thread = threading.Thread(target=_reader, daemon=True)
-        self._reader_thread.start()
-
+        self._launch(cmd)
 
     def send_input(self, text: str) -> bool:
         """Envía una línea al stdin del proceso (para manejar input())."""
@@ -302,7 +330,6 @@ class ProcessRunner:
             self._proc.terminate()  # type: ignore[union-attr]
         except Exception:
             pass
-        # Espera breve; si no muere, kill.
         for _ in range(30):
             if not self.is_running():
                 break
@@ -321,40 +348,40 @@ class ProcessRunner:
 
 class AnexosApp(ctk.CTk):
 
-    """Ventana principal de la aplicación."""
-
     def __init__(self) -> None:
         super().__init__()
-        # Apariencia y escalado (usabilidad)
+        # Apariencia
         ctk.set_appearance_mode("system")
         ctk.set_default_color_theme("blue")
         ctk.set_widget_scaling(1.15)
         ctk.set_window_scaling(1.05)
 
         self.title(APP_NAME)
-        self.geometry("1100x800")
-        self.minsize(950, 700)
+        self.geometry("1200x850")
+        self.minsize(980, 720)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.runner = ProcessRunner(self.log_queue)
 
         self._build_state()
 
-        # --- NUEVO: TabView para secciones ---
+        # --- TabView para secciones ---
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=10)
         self.tab_terminal = self.tabs.add("Terminal")
         self.tab_generacion = self.tabs.add("Generación de Anejos")
+        self.tab_move = self.tabs.add("Mover anexos al NAS")
 
         self._build_terminal_tab()
         self._build_generacion_tab()
+        self._build_move_tab()
 
         self._apply_saved_config()
         self._poll_logs()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    # ---------- pestaña terminal ----------
     def _build_terminal_tab(self):
-        """Construye la pestaña de terminal (solo logs y entrada opcional)."""
         frame = ctk.CTkFrame(self.tab_terminal)
         frame.pack(fill="both", expand=True, padx=10, pady=10)
         label = ctk.CTkLabel(frame, text="Terminal de salida de procesos", font=ctk.CTkFont(size=16, weight="bold"))
@@ -362,9 +389,14 @@ class AnexosApp(ctk.CTk):
         self.txt_terminal = ctk.CTkTextbox(frame, height=500, font=ctk.CTkFont(size=13))
         self.txt_terminal.pack(fill="both", expand=True, padx=4, pady=(0, 8))
 
+    def _log_terminal(self, text: str) -> None:
+        self.txt_terminal.configure(state="normal")
+        self.txt_terminal.insert("end", text + "\n")
+        self.txt_terminal.see("end")
+        self.txt_terminal.configure(state="disabled")
+
+    # ---------- pestaña generar ----------
     def _build_generacion_tab(self):
-        """Construye la pestaña de generación de anexos (toda la UI de configuración)."""
-        # Reutiliza el contenido de _build_widgets, pero en self.tab_generacion
         pad = {"padx": 14, "pady": 10}
         font_title = ctk.CTkFont(size=22, weight="bold")
         font_label = ctk.CTkFont(size=14)
@@ -372,8 +404,8 @@ class AnexosApp(ctk.CTk):
         font_log = ctk.CTkFont(size=13)
 
         # Título
-        title = ctk.CTkLabel(self.tab_generacion, text="Interfaz de Anexos", font=font_title)
-        title.pack(**pad, anchor="w")
+        ctk.CTkLabel(self.tab_generacion, text="Interfaz de Anejos", font=font_title)\
+            .pack(**pad, anchor="w")
 
         # Frame selección carpetas
         paths_frame = ctk.CTkFrame(self.tab_generacion)
@@ -465,6 +497,7 @@ class AnexosApp(ctk.CTk):
         self.combo_year.grid(row=1, column=3, sticky="w", padx=10, pady=(0, 10))
 
         opts_frame.grid_columnconfigure(2, weight=1)
+
         # Ámbito de centros
         ctk.CTkLabel(opts_frame, text="Ámbito de centros:", font=font_label)\
             .grid(row=2, column=0, sticky="w", padx=10, pady=(10, 10))
@@ -504,22 +537,70 @@ class AnexosApp(ctk.CTk):
         self.btn_stop.pack(side="left", padx=8, pady=12)
         self.btn_exit.pack(side="right", padx=8, pady=12)
 
-        # Logs (solo para generación, no terminal)
+        # Logs
         ctk.CTkLabel(self.tab_generacion, text="Historial de ejecución:", font=ctk.CTkFont(size=15, weight="bold")).pack(**pad, anchor="w")
         self.txt_logs = ctk.CTkTextbox(self.tab_generacion, height=360, font=font_log)
         self.txt_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
         self._log("Listo. Configura las carpetas y el modo, luego pulsa 'Ejecutar'.")
 
+    # ---------- pestaña mover ----------
+    def _build_move_tab(self):
+        pad = {"padx": 14, "pady": 10}
+        font_title = ctk.CTkFont(size=22, weight="bold")
+        font_label = ctk.CTkFont(size=14)
+        font_btn = ctk.CTkFont(size=14)
 
-    def _log_terminal(self, text: str) -> None:
-        self.txt_terminal.configure(state="normal")
-        self.txt_terminal.insert("end", text + "\n")
-        self.txt_terminal.see("end")
-        self.txt_terminal.configure(state="disabled")
+        ctk.CTkLabel(self.tab_move, text="Mover anexos al NAS", font=font_title)\
+            .pack(**pad, anchor="w")
+
+        frame = ctk.CTkFrame(self.tab_move)
+        frame.pack(fill="x", **pad)
+
+        def row(r: int, label: str, var: StringVar, browse_cmd):
+            ctk.CTkLabel(frame, text=label, font=font_label).grid(row=r, column=0, sticky="w", padx=10, pady=10)
+            ctk.CTkEntry(frame, textvariable=var, width=720, height=38, state="disabled")\
+                .grid(row=r, column=1, sticky="we", padx=10, pady=10)
+            ctk.CTkButton(frame, text="Seleccionar...", command=browse_cmd, height=38, font=font_btn)\
+                .grid(row=r, column=2, padx=10, pady=10)
+
+        row(0, "Carpeta local (raíz por centro):", self.mv_local_root, self._choose_mv_local_root)
+        row(1, "Carpeta NAS (carpetas de centros):", self.mv_nas_root, self._choose_mv_nas_root)
+
+        frame.grid_columnconfigure(1, weight=1)
+
+        # Filtro de centros
+        filter_frame = ctk.CTkFrame(self.tab_move)
+        filter_frame.pack(fill="x", **pad)
+
+        ctk.CTkLabel(filter_frame, text="Filtrar centros (opcional):", font=font_label)\
+            .grid(row=0, column=0, sticky="w", padx=10, pady=10)
+        self.mv_centers_entry = ctk.CTkEntry(filter_frame, textvariable=self.mv_centers_expr,
+                                             width=360, height=38,
+                                             placeholder_text="C0001-C0010, C0012")
+        self.mv_centers_entry.grid(row=0, column=1, sticky="w", padx=10, pady=10)
+
+        # Dry-run
+        self.mv_dry_run_chk = ctk.CTkCheckBox(filter_frame, text="Simular (no mueve archivos)", variable=self.mv_dry_run)
+        self.mv_dry_run_chk.grid(row=0, column=2, sticky="w", padx=10, pady=10)
+
+        # Botones
+        btn_frame = ctk.CTkFrame(self.tab_move)
+        btn_frame.pack(fill="x", **pad)
+        self.btn_mv_run = ctk.CTkButton(btn_frame, text="Mover al NAS", command=self._on_mv_run, width=160, height=42, font=font_btn)
+        self.btn_mv_stop = ctk.CTkButton(btn_frame, text="Detener", command=self._on_stop, width=120, height=42, font=font_btn, state="disabled")
+        self.btn_mv_run.pack(side="left", padx=8, pady=12)
+        self.btn_mv_stop.pack(side="left", padx=8, pady=12)
+
+        # Logs de movimiento
+        ctk.CTkLabel(self.tab_move, text="Salida:", font=ctk.CTkFont(size=15, weight="bold")).pack(**pad, anchor="w")
+        self.txt_mv_logs = ctk.CTkTextbox(self.tab_move, height=360, font=ctk.CTkFont(size=13))
+        self.txt_mv_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
+        self._log_mv("Configura las carpetas y pulsa 'Mover al NAS'.")
 
     # ----- estado (tk variables) -----
 
     def _build_state(self) -> None:
+        # Generación
         self.excel_dir = StringVar(value="")
         self.word_dir = StringVar(value="")
         self.html_templates_dir = StringVar(value="")
@@ -527,186 +608,45 @@ class AnexosApp(ctk.CTk):
         self.output_dir = StringVar(value="")
         self.cee_dir = StringVar(value="")
         self.plans_dir = StringVar(value="")
-        self.caratulas_dir = StringVar(value="")  # NUEVO: carpeta de carátulas para Anejo 5
+        self.caratulas_dir = StringVar(value="")  # carpeta de carátulas (Anejo 5)
+
         self.mode_var = StringVar(value="all")
         self.anexo_value = IntVar(value=ANEXO_CHOICES[0])
         now = datetime.now()
         self.month_var = StringVar(value=str(now.month).zfill(2))
         self.year_var = IntVar(value=now.year)
         self.center_mode = ctk.StringVar(value="all")   # "all" | "one"
-        self.center_value = ctk.StringVar(value="")     # "C0001-C0010" o "C0001, C0010"    
+        self.center_value = ctk.StringVar(value="")     # "C0001-C0010, C0003"
 
-    # ----- UI -----
+        # Movimiento
+        self.mv_local_root = StringVar(value="")
+        self.mv_nas_root = StringVar(value="")
+        self.mv_centers_expr = StringVar(value="")
+        self.mv_dry_run = ctk.BooleanVar(value=False)
 
-    def _build_widgets(self) -> None:
-        pad = {"padx": 14, "pady": 10}
-        font_title = ctk.CTkFont(size=22, weight="bold")
-        font_label = ctk.CTkFont(size=14)
-        font_btn = ctk.CTkFont(size=14)
-        font_log = ctk.CTkFont(size=13)
-
-        # Título
-        title = ctk.CTkLabel(self, text="Interfaz de Anexos", font=font_title)
-        title.pack(**pad, anchor="w")
-
-        # Frame selección carpetas
-        paths_frame = ctk.CTkFrame(self)
-        paths_frame.pack(fill="x", **pad)
-
-        # Helper para fila de selección de carpeta
-        def path_row(r: int, label: str, var: StringVar, browse_cmd, required: bool = False):
-            lab_txt = f"{label}{' (obligatoria)' if required else ''}:"
-            ctk.CTkLabel(paths_frame, text=lab_txt, font=font_label)\
-                .grid(row=r, column=0, sticky="w", padx=10, pady=10)
-            entry = ctk.CTkEntry(paths_frame, textvariable=var, width=620, height=38, state="disabled")
-            entry.grid(row=r, column=1, sticky="we", padx=10, pady=10)
-            ctk.CTkButton(paths_frame, text="Seleccionar...", command=browse_cmd, height=38, font=font_btn)\
-                .grid(row=r, column=2, padx=10, pady=10)
-
-        # Filas
-        path_row(0, "Carpeta de Excel", self.excel_dir, self._choose_excel, required=True)
-        path_row(1, "Carpeta de Word (plantillas)", self.word_dir, self._choose_word)
-        path_row(2, "Carpeta de plantillas HTML", self.html_templates_dir, self._choose_html_templates)
-        path_row(3, "Carpeta de carátulas (Anejo 5)", self.caratulas_dir, self._choose_caratulas)
-        path_row(4, "Carpeta de fotos", self.photos_dir, self._choose_photos)
-        path_row(5, "Carpeta de salida (anexos)", self.output_dir, self._choose_output)
-        path_row(6, "Carpeta de CEE", self.cee_dir, self._choose_cee)
-        path_row(7, "Carpeta de planos", self.plans_dir, self._choose_plans)
-
-        paths_frame.grid_columnconfigure(1, weight=1)
-
-        # Frame opciones
-        opts_frame = ctk.CTkFrame(self)
-        opts_frame.pack(fill="x", **pad)
-
-        ctk.CTkLabel(opts_frame, text="Modo de ejecución:", font=font_label)\
-            .grid(row=0, column=0, sticky="w", padx=10, pady=10)
-
-        self.radio_all = ctk.CTkRadioButton(
-            opts_frame, text="Crear todos", variable=self.mode_var, value="all",
-            command=self._on_mode_change, font=font_label
-        )
-        self.radio_single = ctk.CTkRadioButton(
-            opts_frame, text="Crear uno", variable=self.mode_var, value="single",
-            command=self._on_mode_change, font=font_label
-        )
-        self.radio_all.grid(row=0, column=1, sticky="w", padx=10, pady=10)
-        self.radio_single.grid(row=0, column=2, sticky="w", padx=10, pady=10)
-
-        ctk.CTkLabel(opts_frame, text="Anexo:", font=font_label)\
-            .grid(row=0, column=3, sticky="e", padx=10, pady=10)
-        self.combo_anexo = ctk.CTkComboBox(
-            opts_frame,
-            values=[f"Anexo {n}" for n in ANEXO_CHOICES],
-            command=self._on_anexo_select, width=160, height=38, font=font_label
-        )
-        self.combo_anexo.set(f"Anexo {ANEXO_CHOICES[0]}")
-        self.combo_anexo.configure(state="disabled")
-        self.combo_anexo.grid(row=0, column=4, sticky="w", padx=10, pady=10)
-
-        # Mes / Año
-        ctk.CTkLabel(opts_frame, text="Mes:", font=font_label)\
-            .grid(row=1, column=0, sticky="w", padx=10, pady=(0, 10))
-        month_names = [
-            ("01", "01 - Enero"), ("02", "02 - Febrero"), ("03", "03 - Marzo"),
-            ("04", "04 - Abril"), ("05", "05 - Mayo"), ("06", "06 - Junio"),
-            ("07", "07 - Julio"), ("08", "08 - Agosto"), ("09", "09 - Septiembre"),
-            ("10", "10 - Octubre"), ("11", "11 - Noviembre"), ("12", "12 - Diciembre"),
-        ]
-        self.combo_month = ctk.CTkComboBox(
-            opts_frame,
-            values=[label for _val, label in month_names],
-            width=180, height=38, font=font_label,
-            command=lambda v: self.month_var.set(v.split(" - ")[0])
-        )
-        try:
-            idx = int(self.month_var.get()) - 1
-        except Exception:
-            idx = 0
-        self.combo_month.set(month_names[idx][1])
-        self.combo_month.grid(row=1, column=1, sticky="w", padx=10, pady=(0, 10))
-
-        ctk.CTkLabel(opts_frame, text="Año:", font=font_label)\
-            .grid(row=1, column=2, sticky="e", padx=10, pady=(0, 10))
-        year_now = datetime.now().year
-        years = [str(y) for y in range(year_now - 50, year_now + 50)]
-        self.combo_year = ctk.CTkComboBox(
-            opts_frame,
-            values=years,
-            width=120, height=38, font=font_label,
-            command=lambda v: self.year_var.set(int(v))
-        )
-        self.combo_year.set(str(self.year_var.get()))
-        self.combo_year.grid(row=1, column=3, sticky="w", padx=10, pady=(0, 10))
-
-        opts_frame.grid_columnconfigure(2, weight=1)
-        
-        # Ámbito de centros
-        ctk.CTkLabel(opts_frame, text="Ámbito de centros:", font=font_label)\
-            .grid(row=2, column=0, sticky="w", padx=10, pady=(10, 10))
-
-        self.radio_centers_all = ctk.CTkRadioButton(
-            opts_frame, text="Todos", variable=self.center_mode, value="all",
-            command=self._on_center_mode_change, font=font_label
-        )
-        self.radio_centers_one = ctk.CTkRadioButton(
-            opts_frame, text="Solo centro(s):", variable=self.center_mode, value="one",
-            command=self._on_center_mode_change, font=font_label
-        )
-
-        self.radio_centers_all.grid(row=2, column=1, sticky="w", padx=10, pady=(10, 10))
-        self.radio_centers_one.grid(row=2, column=2, sticky="w", padx=10, pady=(10, 10))
-
-        self.entry_center = ctk.CTkEntry(
-            opts_frame,
-            textvariable=self.center_value,
-            width=240,
-            height=38,
-            placeholder_text="C0001-C0010 o C0001, C0010"
-        )
-        self.entry_center.grid(row=2, column=3, sticky="w", padx=10, pady=(10, 10))
-        self.entry_center.configure(state="disabled")
-
-        # Botonera
-        btn_frame = ctk.CTkFrame(self)
-        btn_frame.pack(fill="x", **pad)
-
-        self.btn_run = ctk.CTkButton(btn_frame, text="Ejecutar", command=self._on_run, width=140, height=40, font=font_btn)
-        self.btn_stop = ctk.CTkButton(btn_frame, text="Detener ejecución", command=self._on_stop,
-                                      width=180, height=40, font=font_btn, state="disabled")
-        self.btn_exit = ctk.CTkButton(btn_frame, text="Salir", command=self._on_close, width=120, height=40, font=font_btn)
-
-        self.btn_run.pack(side="left", padx=8, pady=12)
-        self.btn_stop.pack(side="left", padx=8, pady=12)
-        self.btn_exit.pack(side="right", padx=8, pady=12)
-
-        # Logs
-        ctk.CTkLabel(self, text="Historial de ejecución:", font=ctk.CTkFont(size=15, weight="bold")).pack(**pad, anchor="w")
-        self.txt_logs = ctk.CTkTextbox(self, height=360, font=font_log)
-        self.txt_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
-        self._log("Listo. Configura las carpetas y el modo, luego pulsa 'Ejecutar'.")
-
-    def _on_center_mode_change(self) -> None:
-        """Habilita/deshabilita el input de centros según el radio."""
-        if self.center_mode.get() == "one":
-            self.entry_center.configure(state="normal")
-            try:
-                self.entry_center.focus()
-            except Exception:
-                pass
-        else:
-            self.entry_center.configure(state="disabled")
-            self.center_value.set("")
-    
-    # ----- helpers UI -----
+    # ----- helpers UI comunes -----
 
     def _log(self, text: str) -> None:
-        self.txt_logs.configure(state="normal")
-        self.txt_logs.insert("end", text + "\n")
-        self.txt_logs.see("end")
-        self.txt_logs.configure(state="disabled")
-        # También mostrar en terminal
-        self._log_terminal(text)
+        # Logs de la pestaña "Generación de Anejos" (no escribir en la terminal aquí)
+        if hasattr(self, "txt_logs"):
+            self.txt_logs.configure(state="normal")
+            self.txt_logs.insert("end", text + "\n")
+            self.txt_logs.see("end")
+            self.txt_logs.configure(state="disabled")
+
+
+    def _log_mv(self, text: str) -> None:
+        # Logs de la pestaña "Mover anexos al NAS" (no escribir en la terminal aquí)
+        if hasattr(self, "txt_mv_logs"):
+            self.txt_mv_logs.configure(state="normal")
+            self.txt_mv_logs.insert("end", text + "\n")
+            self.txt_mv_logs.see("end")
+            self.txt_mv_logs.configure(state="disabled")
+
+        
+        
+
+    # ----- browsers -----
 
     def _choose_excel(self) -> None:
         path = filedialog.askdirectory(title="Selecciona carpeta de Excel")
@@ -748,6 +688,19 @@ class AnexosApp(ctk.CTk):
         if path:
             self.caratulas_dir.set(path)
 
+    # Movimiento
+    def _choose_mv_local_root(self) -> None:
+        path = filedialog.askdirectory(title="Selecciona la carpeta local raíz (Cxxxx o varias Cxxxx)")
+        if path:
+            self.mv_local_root.set(path)
+
+    def _choose_mv_nas_root(self) -> None:
+        path = filedialog.askdirectory(title="Selecciona la carpeta del NAS con las carpetas de los centros (p.ej. 02_UN EDIFICIO)")
+        if path:
+            self.mv_nas_root.set(path)
+
+    # ----- eventos -----
+
     def _on_mode_change(self) -> None:
         # Habilitar/deshabilitar combo según modo
         if self.mode_var.get() == "single":
@@ -761,10 +714,23 @@ class AnexosApp(ctk.CTk):
         except Exception:
             self.anexo_value.set(ANEXO_CHOICES[0])
 
+    def _on_center_mode_change(self) -> None:
+        if self.center_mode.get() == "one":
+            self.entry_center.configure(state="normal")
+            try:
+                self.entry_center.focus()
+            except Exception:
+                pass
+        else:
+            self.entry_center.configure(state="disabled")
+            self.center_value.set("")
+
     # ----- persistencia -----
 
     def _apply_saved_config(self) -> None:
         cfg = ConfigStore.load()
+
+        # Generación
         self.center_mode.set(cfg.get("centers_mode", cfg.get("center_mode", "all")))
         self.center_value.set(cfg.get("centers", cfg.get("center", "")))
         self._on_center_mode_change()
@@ -780,10 +746,6 @@ class AnexosApp(ctk.CTk):
         m = str(cfg.get("month", str(datetime.now().month).zfill(2)))
         y = int(cfg.get("year", datetime.now().year))
         self.month_var.set(m.zfill(2))
-        try:
-            idx = int(self.month_var.get()) - 1
-        except Exception:
-            idx = 0
         if hasattr(self, 'combo_month'):
             month_names = [
                 ("01", "01 - Enero"), ("02", "02 - Febrero"), ("03", "03 - Marzo"),
@@ -791,6 +753,10 @@ class AnexosApp(ctk.CTk):
                 ("07", "07 - Julio"), ("08", "08 - Agosto"), ("09", "09 - Septiembre"),
                 ("10", "10 - Octubre"), ("11", "11 - Noviembre"), ("12", "12 - Diciembre"),
             ]
+            try:
+                idx = int(self.month_var.get()) - 1
+            except Exception:
+                idx = 0
             self.combo_month.set(month_names[idx][1])
         self.year_var.set(y)
         if hasattr(self, 'combo_year'):
@@ -807,16 +773,19 @@ class AnexosApp(ctk.CTk):
         except Exception:
             a = ANEXO_CHOICES[0]
         self.anexo_value.set(a)
-        self.combo_anexo.set(f"Anexo {a}")
+        if hasattr(self, 'combo_anexo'):
+            self.combo_anexo.set(f"Anexo {a}")
 
-    # ----- eventos -----
+        # Movimiento
+        self.mv_local_root.set(cfg.get("mv_local_root", ""))
+        self.mv_nas_root.set(cfg.get("mv_nas_root", ""))
+        self.mv_centers_expr.set(cfg.get("mv_centers_expr", ""))
+        self.mv_dry_run.set(cfg.get("mv_dry_run", False))
+
+    # ----- helpers generación -----
 
     def _collect_options(self) -> RunOptions:
-        """
-        Empaqueta los valores de la UI en un RunOptions.
-        Limpia strings vacíos -> None y convierte mes/año/anexo a int cuando procede.
-        """
-
+        """Empaqueta los valores de la UI de generación en un RunOptions."""
         def _clean(s: object) -> str | None:
             if s is None:
                 return None
@@ -832,37 +801,26 @@ class AnexosApp(ctk.CTk):
             except Exception:
                 return None
 
-        # ⚠️ Usa mode_var (no existe radio_mode_single)
         mode = "single" if self.mode_var.get() == "single" else "all"
 
-        # Expresión de centros (rango/lista) solo si el usuario selecciona "Solo centro(s)"
         center_expr = None
         if self.center_mode.get() == "one":
             center_expr = _clean(self.center_value.get())
 
         return RunOptions(
-            # Rutas base
-            excel_dir=(self.excel_dir.get() or "").strip(),   # obligatorio
+            excel_dir=(self.excel_dir.get() or "").strip(),
             word_dir=_clean(self.word_dir.get()),
             output_dir=_clean(self.output_dir.get()),
             html_templates_dir=_clean(self.html_templates_dir.get()),
             photos_dir=_clean(self.photos_dir.get()),
             cee_dir=_clean(self.cee_dir.get()),
             plans_dir=_clean(self.plans_dir.get()),
-
-            # Ejecución  ⚠️ Usa anexo_value (no existe anexo_var)
             mode=mode,
             anexo=_to_int(self.anexo_value.get()) if mode == "single" else None,
-
-            # Fecha
             month=_to_int(self.month_var.get()),
             year=_to_int(self.year_var.get()),
-
-            # Centros
             center=center_expr,
         )
-
-
 
     def _ensure_output_dir(self, output_dir: Optional[str]) -> bool:
         """Si se ha indicado carpeta de salida y no existe, propone crearla."""
@@ -870,7 +828,6 @@ class AnexosApp(ctk.CTk):
             return True
         if os.path.isdir(output_dir):
             return True
-        # Preguntar si crear
         if messagebox.askyesno(APP_NAME, f"La carpeta de salida no existe:\n\n{output_dir}\n\n¿Deseas crearla?", parent=self):
             try:
                 os.makedirs(output_dir, exist_ok=True)
@@ -887,7 +844,6 @@ class AnexosApp(ctk.CTk):
             messagebox.showerror(APP_NAME, msg, parent=self)
             return
 
-        # Crear output_dir si fue indicado y no existe
         if not self._ensure_output_dir(opts.output_dir):
             return
 
@@ -905,10 +861,14 @@ class AnexosApp(ctk.CTk):
             "month": int(self.month_var.get()),
             "year": int(self.year_var.get()),
             "centers_mode": self.center_mode.get(),
-            "centers": self.center_value.get().strip() if self.center_mode.get() == "one" else ""
+            "centers": self.center_value.get().strip() if self.center_mode.get() == "one" else "",
+            # también persistimos los de movimiento sin tocarlos
+            "mv_local_root": self.mv_local_root.get(),
+            "mv_nas_root": self.mv_nas_root.get(),
+            "mv_centers_expr": self.mv_centers_expr.get(),
+            "mv_dry_run": bool(self.mv_dry_run.get()),
         })
 
-        # Avisos no intrusivos
         if not opts.word_dir:
             self._log("Aviso: no se seleccionó carpeta de Word (plantillas).")
         if not opts.html_templates_dir:
@@ -936,11 +896,61 @@ class AnexosApp(ctk.CTk):
             self.btn_stop.configure(state="disabled")
             messagebox.showerror(APP_NAME, f"Error al iniciar el proceso:\n{e}", parent=self)
 
+    # ----- movimiento -----
+
+    def _collect_move_options(self) -> MoveOptions:
+        return MoveOptions(
+            local_out_root=(self.mv_local_root.get() or "").strip(),
+            nas_centers_dir=(self.mv_nas_root.get() or "").strip(),
+            centers_expr=(self.mv_centers_expr.get() or "").strip() or None,
+            dry_run=bool(self.mv_dry_run.get()),
+        )
+
+    def _on_mv_run(self) -> None:
+        opts = self._collect_move_options()
+        ok, msg = Validator.validate_move_options(opts)
+        if not ok:
+            messagebox.showerror(APP_NAME, msg, parent=self)
+            return
+
+        # Guardar selección
+        cfg = ConfigStore.load()
+        cfg.update({
+            "mv_local_root": opts.local_out_root,
+            "mv_nas_root": opts.nas_centers_dir,
+            "mv_centers_expr": opts.centers_expr or "",
+            "mv_dry_run": bool(opts.dry_run),
+        })
+        ConfigStore.save(cfg)
+
+        try:
+            self.btn_mv_run.configure(state="disabled")
+            self.btn_mv_stop.configure(state="normal")
+            self._log_mv("\n=== Iniciando movimiento de anexos al NAS ===")
+            self.runner.start_move(opts)
+        except FileNotFoundError as e:
+            self.btn_mv_run.configure(state="normal")
+            self.btn_mv_stop.configure(state="disabled")
+            messagebox.showerror(APP_NAME, str(e), parent=self)
+        except Exception as e:
+            self.btn_mv_run.configure(state="normal")
+            self.btn_mv_stop.configure(state="disabled")
+            messagebox.showerror(APP_NAME, f"Error al iniciar el movimiento:\n{e}", parent=self)
+
+    # ----- cierre / polling -----
+
     def _on_stop(self) -> None:
         if self.runner.is_running():
             self.runner.stop()
-        self.btn_stop.configure(state="disabled")
-        self.btn_run.configure(state="normal")
+        # reactivar botones de ambas pestañas
+        if hasattr(self, "btn_stop"):
+            self.btn_stop.configure(state="disabled")
+        if hasattr(self, "btn_run"):
+            self.btn_run.configure(state="normal")
+        if hasattr(self, "btn_mv_stop"):
+            self.btn_mv_stop.configure(state="disabled")
+        if hasattr(self, "btn_mv_run"):
+            self.btn_mv_run.configure(state="normal")
 
     def _on_close(self) -> None:
         if self.runner.is_running():
@@ -950,24 +960,44 @@ class AnexosApp(ctk.CTk):
             time.sleep(0.3)
         self.destroy()
 
-    # ----- polling de logs -----
-
     def _poll_logs(self) -> None:
         try:
             while True:
                 line = self.log_queue.get_nowait()
+
+                # 1) Escribir SOLO UNA VEZ en la pestaña "Terminal"
+                self._log_terminal(line)
+
+                # 2) Reflejar la misma línea en los cuadros de cada pestaña
+                #    (sin que ellos vuelvan a escribir en la Terminal)
                 self._log(line)
+                self._log_mv(line)
         except queue.Empty:
             pass
-        # auto-habilitar/deshabilitar botones según estado del proceso
+
+        # Actualizar estado de botones según si hay proceso en marcha
         if self.runner.is_running():
-            self.btn_stop.configure(state="normal")
-            self.btn_run.configure(state="disabled")
+            if hasattr(self, "btn_stop"):
+                self.btn_stop.configure(state="normal")
+            if hasattr(self, "btn_run"):
+                self.btn_run.configure(state="disabled")
+            if hasattr(self, "btn_mv_stop"):
+                self.btn_mv_stop.configure(state="normal")
+            if hasattr(self, "btn_mv_run"):
+                self.btn_mv_run.configure(state="disabled")
         else:
-            self.btn_stop.configure(state="disabled")
-            self.btn_run.configure(state="normal")
-        # reprogramar
+            if hasattr(self, "btn_stop"):
+                self.btn_stop.configure(state="disabled")
+            if hasattr(self, "btn_run"):
+                self.btn_run.configure(state="normal")
+            if hasattr(self, "btn_mv_stop"):
+                self.btn_mv_stop.configure(state="disabled")
+            if hasattr(self, "btn_mv_run"):
+                self.btn_mv_run.configure(state="normal")
+
+        # Reprogramar el polling
         self.after(100, self._poll_logs)
+
 
 
 def main() -> None:

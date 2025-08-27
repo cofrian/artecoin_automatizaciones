@@ -21,54 +21,9 @@ Requisitos:
 
 from __future__ import annotations
 
-# ...existing imports...
-
-# =====================================================================================
-# Generador para Anejo 5 (invoca el orquestador externo)
-# =====================================================================================
-
-class Anexo5Generator:
-    anexo_number = 5
-
-    def __init__(self, config: RunConfig):
-        self.config = config
-
-    def generate(self, excel_path: Path, config_month: Optional[str] = None, config_year: Optional[int] = None):
-        """
-        Llama al orquestador anejo5_orchestrator.py como subproceso, pasando los argumentos necesarios.
-        """
-        import subprocess
-        import sys
-        import os
-        
-        # Buscar anejo5_orchestrator.py en la misma carpeta que este script
-        script_dir = Path(__file__).parent
-        orchestrator_path = script_dir / 'anejo5_orchestrator.py'
-        
-        if not orchestrator_path.exists():
-            logger.error(f"[ERROR] No se encontró anejo5_orchestrator.py en {orchestrator_path}")
-            return
-        
-        args = [sys.executable, '-u', str(orchestrator_path),
-                '--excel-dir', str(self.config.excel_dir),
-                '--photos-dir', str(self.config.photos_dir or ''),
-                '--html-templates-dir', str(self.config.html_templates_dir or ''),
-                '--caratulas-dir', str(self.config.output_dir or ''),
-        ]
-        if self.config.center:
-            args += ['--center', self.config.center]
-        # Limpiar argumentos vacíos
-        args = [a for a in args if a != '']
-        logger.info(f"[Anejo 5] Llamando orquestador: {' '.join(args)}")
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
-        for line in proc.stdout:
-            logger.info(line.rstrip())
-        proc.wait()
-        if proc.returncode != 0:
-            logger.error(f"[ERROR] Orquestador terminó con código {proc.returncode}")
-        else:
-            logger.info("[OK] Anejo 5 completado.")
-
+import shutil
+import json
+import os
 import argparse
 import logging
 import queue
@@ -89,6 +44,44 @@ import win32com.client as win32_client  # type: ignore
 from docxtpl import DocxTemplate  # type: ignore
 from pypdf import PdfReader, PdfWriter  # type: ignore
 from win32com.client import CDispatch  # type: ignore
+
+# =====================================================================================
+# Generador para Anejo 5 (invoca el orquestador externo)
+# =====================================================================================
+
+class Anexo5Generator:
+    anexo_number = 5
+
+    def __init__(self, config: RunConfig):
+        self.config = config
+
+    def generate(self, excel_path: Path, config_month: Optional[str] = None, config_year: Optional[int] = None):
+        """
+        Llama al orquestador anejo5_orchestrator.py como subproceso, pasando los argumentos necesarios.
+        """
+        import subprocess
+        import sys
+        args = [sys.executable, '-u', 'anejo5_orchestrator.py',
+                '--excel-dir', str(self.config.excel_dir),
+                '--photos-dir', str(self.config.photos_dir or ''),
+                '--html-templates-dir', str(self.config.html_templates_dir or ''),
+                '--caratulas-dir', str(self.config.output_dir or ''),
+        ]
+        if self.config.center:
+            args += ['--center', self.config.center]
+        # Limpiar argumentos vacíos
+        args = [a for a in args if a != '']
+        logger.info(f"[Anejo 5] Llamando orquestador: {' '.join(args)}")
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+        for line in proc.stdout:
+            logger.info(line.rstrip())
+        proc.wait()
+        if proc.returncode != 0:
+            logger.error(f"[ERROR] Orquestador terminó con código {proc.returncode}")
+        else:
+            logger.info("[OK] Anejo 5 completado.")
+
+
 
 
 # Silenciar avisos verbosos de pypdf (duplicados /PageMode, etc.)
@@ -134,19 +127,29 @@ def ensure_utf8_console() -> None:
 
 @dataclass(frozen=True)
 class RunConfig:
-    excel_dir: Path
-    word_dir: Optional[Path]
-    mode: str  # "all" | "single"
-    anexo: Optional[int]  # requerido si mode == "single"
-    month: Optional[str] = None  # nombre del mes o número (1-12)
-    year: Optional[int] = None  # año
+    # Acción a realizar
+    action: str = "generate"  # "generate" | "move-to-nas"
+
+    # --- parámetros GENERATE (opcionales si action=move-to-nas) ---
+    excel_dir: Optional[Path] = None
+    word_dir: Optional[Path] = None
+    mode: Optional[str] = None  # "all" | "single"
+    anexo: Optional[int] = None
+    month: Optional[str] = None
+    year: Optional[int] = None
     html_templates_dir: Optional[Path] = None
     photos_dir: Optional[Path] = None
     output_dir: Optional[Path] = None
-    cee_dir: Optional[Path] = None  # carpeta de certificados energéticos
-    plans_dir: Optional[Path] = None  # carpeta de planos
-    center: Optional[str] = None  # Cxxxx para filtrar un único centro
-    centers: Optional[str] = None  # rango/lista p.ej. "C0001-C0010" o "C0001, C0010"
+    cee_dir: Optional[Path] = None
+    plans_dir: Optional[Path] = None
+    center: Optional[str] = None
+    centers: Optional[str] = None
+
+    # --- parámetros MOVE-TO-NAS ---
+    local_out_root: Optional[Path] = None   # raíz local con Cxxxx(/anexos)
+    nas_centers_dir: Optional[Path] = None  # carpeta NAS con 01_Cxxxx_* / 02_Cxxxx_*
+    dry_run: bool = False                   # simular
+
 
 
 @dataclass(frozen=True)
@@ -2371,6 +2374,151 @@ class Anexo7Generator:
 # Orquestador / Aplicación
 # =====================================================================================
 
+class MoveToNASService:
+    """
+    Mueve archivos DOCX/PDF desde una carpeta local organizada por centros (Cxxxx)
+    hacia las carpetas de centros del NAS (01_Cxxxx_* o 02_Cxxxx_*), colocándolos
+    bajo la subcarpeta 'ANEJOS' (creándola si no existe). Además, copia siempre el
+    Anejo 1 (docx/pdf) a cada centro si se localizan las plantillas.
+    """
+
+    def __init__(
+        self,
+        local_root: Path,
+        nas_centers_dir: Path,
+        targets: Optional[set[str]] = None,
+        dry_run: bool = False,
+        anexo1_files: Optional[list[tuple[Path, str]]] = None,  # (src, nombre_destino)
+    ) -> None:
+        self.local_root = local_root
+        self.nas_centers_dir = nas_centers_dir
+        self.targets = targets
+        self.dry_run = dry_run
+        self.anexo1_files = anexo1_files or []
+
+    @staticmethod
+    def _is_center_dir(p: Path) -> bool:
+        return p.is_dir() and re.fullmatch(r"C\d{4}", p.name.upper() or "") is not None
+
+    def _iter_center_dirs_local(self) -> List[Path]:
+        # Caso 1: el propio root es Cxxxx
+        if self._is_center_dir(self.local_root):
+            return [self.local_root]
+        # Caso 2: subcarpetas Cxxxx
+        centers = [d for d in self.local_root.iterdir() if self._is_center_dir(d)]
+        # Caso 3: un nivel más abajo
+        if not centers:
+            for d in self.local_root.iterdir():
+                if d.is_dir():
+                    centers.extend([sub for sub in d.iterdir() if self._is_center_dir(sub)])
+        return sorted(centers, key=lambda p: p.name.upper())
+
+    @staticmethod
+    def _files_in_center_dir(center_dir: Path) -> List[Path]:
+        base = center_dir / "anexos"
+        if not base.exists() or not base.is_dir():
+            base = center_dir
+        return sorted(
+            [p for p in base.iterdir() if p.is_file() and p.suffix.lower() in (".docx", ".pdf")],
+            key=lambda p: p.name.lower()
+        )
+
+    def _find_nas_dest_for_center(self, center_id: str) -> Optional[Path]:
+        center_id = center_id.upper()
+        for d in self.nas_centers_dir.iterdir():
+            if not d.is_dir():
+                continue
+            if center_id in d.name.upper():
+                return d / "ANEJOS"
+        return None
+
+    @staticmethod
+    def _copy_if_needed(src: Path, dst: Path, dry_run: bool) -> bool:
+        """
+        Copia si no existe o si difiere por tamaño. Devuelve True si se copia (o se copiaría).
+        """
+        if not src.exists():
+            return False
+        if dst.exists():
+            try:
+                if dst.stat().st_size == src.stat().st_size:
+                    return False  # ya está igual
+            except Exception:
+                pass
+        if dry_run:
+            return True
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        return True
+
+    def execute(self) -> int:
+        centers = self._iter_center_dirs_local()
+        if self.targets:
+            centers = [c for c in centers if c.name.upper() in self.targets]
+
+        if not centers:
+            logger.warning("No se encontraron carpetas Cxxxx en la ruta local indicada.")
+            return 2
+
+        logger.info(f"Centros locales detectados: {', '.join(c.name for c in centers)}")
+        moved = 0
+        missing: List[str] = []
+
+        for cdir in centers:
+            cid = cdir.name.upper()
+            files = self._files_in_center_dir(cdir)
+            dest = self._find_nas_dest_for_center(cid)
+
+            if not dest:
+                logger.warning(f"- {cid}: no se encontró carpeta en NAS (01_{cid}_* / 02_{cid}_*)")
+                missing.append(cid)
+                continue
+
+            dest.mkdir(parents=True, exist_ok=True)
+            logger.info(f"- {cid}: destino = {dest}")
+
+            # 1) Copiar siempre Anejo 1 si tenemos las plantillas localizadas
+            for src, dest_name in self.anexo1_files:
+                try:
+                    target = dest / dest_name
+                    if self._copy_if_needed(src, target, self.dry_run):
+                        logger.info(f"   {'[SIMULAR] ' if self.dry_run else ''}Anejo 1 -> {target.name}")
+                except Exception as e:
+                    logger.error(f"   ! Error copiando Anejo 1 ({src.name}): {e}")
+
+            # 2) Mover anexos DOCX/PDF generados localmente para este centro
+            if not files:
+                logger.info("   (sin DOCX/PDF locales para mover)")
+                continue
+
+            for src in files:
+                dst = dest / src.name
+                if self.dry_run:
+                    logger.info(f"   [SIMULAR] mover {src}  ->  {dst}")
+                    continue
+                try:
+                    if dst.exists():
+                        try:
+                            dst.unlink()
+                        except Exception:
+                            pass
+                    shutil.move(str(src), str(dst))
+                    moved += 1
+                    logger.info(f"   ✓ {src.name} -> {dst.name}")
+                except Exception as e:
+                    logger.error(f"   ! Error moviendo {src.name}: {e}")
+
+        if self.dry_run:
+            logger.info("\n[SIMULACIÓN COMPLETADA] No se ha movido ningún archivo.")
+            return 0
+
+        logger.info(f"\nTotal de archivos movidos: {moved}")
+        if missing:
+            logger.warning("Centros no encontrados en NAS: " + ", ".join(sorted(missing)))
+        return 0
+
+
+
 
 class AnexoFactory:
     """Registra e instancia generadores disponibles."""
@@ -2545,77 +2693,119 @@ def run_application(config: RunConfig) -> int:
     logger.info("\n--- Proceso finalizado correctamente ---")
     return 0
 
+def run_move_to_nas(config: RunConfig) -> int:
+    if not config.local_out_root or not config.local_out_root.exists():
+        logger.error("Debes indicar --local-out-root con una carpeta válida.")
+        return 2
+    if not config.nas_centers_dir or not config.nas_centers_dir.exists():
+        logger.error("Debes indicar --nas-centers-dir con una carpeta válida.")
+        return 2
+
+    # --- Resolver carpeta de plantillas (word_dir) sin parámetros ---
+    candidate_dirs: list[Path] = []
+
+    # 1) word_dir si vino por CLI (aunque no es obligatorio)
+    if config.word_dir and config.word_dir.exists():
+        candidate_dirs.append(config.word_dir)
+
+    # 2) Intentar leer el último word_dir que guardó la GUI (~/.anexos_gui_config.json)
+    try:
+        cfg_path = Path(os.path.expanduser("~")) / ".anexos_gui_config.json"
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            wd = data.get("word_dir")
+            if wd:
+                p = Path(wd)
+                if p.exists():
+                    candidate_dirs.append(p)
+    except Exception:
+        pass
+
+    # 3) Carpetas típicas alrededor del script y CWD
+    script_dir = Path(__file__).resolve().parent
+    for p in [Path.cwd(), script_dir, script_dir / "word", script_dir / "plantillas", script_dir / "templates"]:
+        if p.exists():
+            candidate_dirs.append(p)
+
+    # Quitar duplicados preservando orden
+    seen = set()
+    uniq_dirs: list[Path] = []
+    for d in candidate_dirs:
+        if d not in seen:
+            uniq_dirs.append(d)
+            seen.add(d)
+
+    def _find_file(basename: str) -> Optional[Path]:
+        for d in uniq_dirs:
+            cand = d / basename
+            if cand.exists():
+                return cand
+        return None
+
+    # Localizar las plantillas del Anejo 1 (sin parámetros)
+    anexo1_docx = _find_file("Plantilla_Anexo_1.docx")
+    anexo1_pdf  = _find_file("Plantilla_Anexo_1.pdf")
+
+    anexo1_files: list[tuple[Path, str]] = []
+    if anexo1_docx:
+        anexo1_files.append((anexo1_docx, anexo1_docx.name))
+    else:
+        logger.warning("No se encontró 'Plantilla_Anexo_1.docx' en las carpetas conocidas.")
+    if anexo1_pdf:
+        anexo1_files.append((anexo1_pdf, anexo1_pdf.name))
+    else:
+        logger.warning("No se encontró 'Plantilla_Anexo_1.pdf' en las carpetas conocidas.")
+
+    targets = get_target_centers_from_config(config)
+    svc = MoveToNASService(
+        local_root=config.local_out_root,
+        nas_centers_dir=config.nas_centers_dir,
+        targets=targets,
+        dry_run=config.dry_run,
+        anexo1_files=anexo1_files,
+    )
+    return svc.execute()
+
+
 
 # =====================================================================================
 # CLI
 # =====================================================================================
 
-
 def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
-    parser = argparse.ArgumentParser(
-        description="Generador de Anexos (refactor SOLID + Clean Architecture)"
-    )
-    parser.add_argument(
-        "--excel-dir", required=True, help="Carpeta que contiene los Excels de entrada"
-    )
-    parser.add_argument(
-        "--word-dir", help="Carpeta donde están las plantillas de Word (DOCX). Opcional"
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["all", "single"],
-        required=True,
-        help="Ejecutar todos o un anexo concreto",
-    )
-    parser.add_argument(
-        "--anexo", type=int, help="Número de anexo cuando --mode single"
-    )
-    parser.add_argument(
-        "--month",
-        help="Mes para los documentos (nombre o número 1-12). Si no se proporciona, se solicita interactivamente",
-    )
-    parser.add_argument(
-        "--year",
-        type=int,
-        help="Año para los documentos. Si no se proporciona, se solicita interactivamente",
-    )
-    parser.add_argument(
-        "--html-templates-dir",
-        help="Carpeta de plantillas HTML (reservado para anexos futuros)",
-    )
-    parser.add_argument(
-        "--photos-dir", help="Carpeta de fotos (reservado para anexos futuros)"
-    )
-    parser.add_argument(
-        "--output-dir",
-        help="Carpeta de salida para anexos. Si no se indica, se usa ./word/anexos",
-    )
-    parser.add_argument(
-        "--cee-dir",
-        help="Carpeta de certificados energéticos (CEE) para el Anexo 6",
-    )
-    parser.add_argument(
-        "--plans-dir",
-        help="Carpeta de planos para el Anexo 7",
-    )
+    parser = argparse.ArgumentParser(description="Generador de Anexos + Movimiento al NAS")
+    parser.add_argument("--action", choices=["generate", "move-to-nas"], default="generate",
+                        help="Acción a realizar")
 
-    parser.add_argument(
-        "--center",
-        help="ID de centro para generar solo ese centro (formato Cxxxx, p.ej. C0016)"
-    )
-    parser.add_argument(
-        "--centers",
-        help="Expresión de centros: rango C0001-C0010 y/o lista C0001, C0010, C0013"
-    )
+    # --- GENERATE (opcionales si action=move-to-nas) ---
+    parser.add_argument("--excel-dir", help="Carpeta con Excels de entrada")
+    parser.add_argument("--word-dir", help="Carpeta con plantillas DOCX (opcional)")
+    parser.add_argument("--mode", choices=["all", "single"], help="Ejecución: todos o uno")
+    parser.add_argument("--anexo", type=int, help="Número de anexo cuando --mode single")
+    parser.add_argument("--month", help="Mes (nombre o 1-12)")
+    parser.add_argument("--year", type=int, help="Año")
+    parser.add_argument("--html-templates-dir", help="Plantillas HTML (opcional)")
+    parser.add_argument("--photos-dir", help="Carpeta de fotos (opcional)")
+    parser.add_argument("--output-dir", help="Carpeta de salida para anexos")
+    parser.add_argument("--cee-dir", help="Carpeta CEE (Anexo 6)")
+    parser.add_argument("--plans-dir", help="Carpeta Planos (Anexo 7)")
+    parser.add_argument("--center", help="Un centro: Cxxxx")
+    parser.add_argument("--centers", help="Expresión de centros: C0001-C0010, C0012")
 
+    # --- MOVE-TO-NAS ---
+    parser.add_argument("--local-out-root", help="Raíz local con subcarpetas Cxxxx (o Cxxxx/anexos)")
+    parser.add_argument("--nas-centers-dir", help="Carpeta del NAS con 01_Cxxxx_* / 02_Cxxxx_*")
+    parser.add_argument("--dry-run", action="store_true", help="Simula (no mueve)")
 
     ns = parser.parse_args(argv)
 
-    def _p(x: Optional[str]) -> Optional[Path]:  # helper
+    def _p(x: Optional[str]) -> Optional[Path]:
         return Path(x) if x else None
 
-    return RunConfig(
-        excel_dir=Path(ns.excel_dir),
+    cfg = RunConfig(
+        action=ns.action,
+        # generate
+        excel_dir=_p(ns.excel_dir),
         word_dir=_p(ns.word_dir),
         mode=ns.mode,
         anexo=ns.anexo,
@@ -2628,22 +2818,36 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
         plans_dir=_p(ns.plans_dir),
         center=ns.center,
         centers=ns.centers,
-        
+        # move-to-nas
+        local_out_root=_p(ns.local_out_root),
+        nas_centers_dir=_p(ns.nas_centers_dir),
+        dry_run=bool(ns.dry_run),
     )
 
+    # Validación mínima condicionada por acción:
+    if cfg.action == "generate":
+        if not cfg.excel_dir or not cfg.mode:
+            parser.error("--excel-dir y --mode son obligatorios cuando action=generate")
+    return cfg
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ensure_utf8_console()
     setup_logging(logging.INFO)
     try:
         config = parse_args(argv)
-        return run_application(config)
+        if config.action == "move-to-nas":
+            return run_move_to_nas(config)
+        else:
+            # Asegurar valores por defecto coherentes
+            if not config.mode:
+                object.__setattr__(config, "mode", "all")
+            return run_application(config)
     except SystemExit as e:
-        # argparse ya imprimió el error
         return int(e.code or 2)
     except Exception as e:
         logger.error(f"Error inesperado: {e}")
         return 1
+
 
 
 if __name__ == "__main__":
