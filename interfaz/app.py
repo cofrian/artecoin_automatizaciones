@@ -340,7 +340,7 @@ class AnexosApp(ctk.CTk):
 
         self._build_state()
 
-        # --- NUEVO: TabView para secciones ---
+        # TabView para secciones
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=10)
         self.tab_terminal = self.tabs.add("Terminal")
@@ -364,158 +364,8 @@ class AnexosApp(ctk.CTk):
 
     def _build_generacion_tab(self):
         """Construye la pestaña de generación de anexos (toda la UI de configuración)."""
-        # Reutiliza el contenido de _build_widgets, pero en self.tab_generacion
-        pad = {"padx": 14, "pady": 10}
-        font_title = ctk.CTkFont(size=22, weight="bold")
-        font_label = ctk.CTkFont(size=14)
-        font_btn = ctk.CTkFont(size=14)
-        font_log = ctk.CTkFont(size=13)
-
-        # Título
-        title = ctk.CTkLabel(self.tab_generacion, text="Interfaz de Anexos", font=font_title)
-        title.pack(**pad, anchor="w")
-
-        # Frame selección carpetas
-        paths_frame = ctk.CTkFrame(self.tab_generacion)
-        paths_frame.pack(fill="x", **pad)
-
-        def path_row(r: int, label: str, var: StringVar, browse_cmd, required: bool = False):
-            lab_txt = f"{label}{' (obligatoria)' if required else ''}:"
-            ctk.CTkLabel(paths_frame, text=lab_txt, font=font_label)\
-                .grid(row=r, column=0, sticky="w", padx=10, pady=10)
-            entry = ctk.CTkEntry(paths_frame, textvariable=var, width=620, height=38, state="disabled")
-            entry.grid(row=r, column=1, sticky="we", padx=10, pady=10)
-            ctk.CTkButton(paths_frame, text="Seleccionar...", command=browse_cmd, height=38, font=font_btn)\
-                .grid(row=r, column=2, padx=10, pady=10)
-
-        # Filas
-        path_row(0, "Carpeta de Excel", self.excel_dir, self._choose_excel, required=True)
-        path_row(1, "Carpeta de Word (plantillas)", self.word_dir, self._choose_word)
-        path_row(2, "Carpeta de plantillas HTML", self.html_templates_dir, self._choose_html_templates)
-        path_row(3, "Carpeta de carátulas (Anejo 5)", self.caratulas_dir, self._choose_caratulas)
-        path_row(4, "Carpeta de fotos", self.photos_dir, self._choose_photos)
-        path_row(5, "Carpeta de salida (anexos)", self.output_dir, self._choose_output)
-        path_row(6, "Carpeta de CEE", self.cee_dir, self._choose_cee)
-        path_row(7, "Carpeta de planos", self.plans_dir, self._choose_plans)
-
-        paths_frame.grid_columnconfigure(1, weight=1)
-
-        # Frame opciones
-        opts_frame = ctk.CTkFrame(self.tab_generacion)
-        opts_frame.pack(fill="x", **pad)
-
-        ctk.CTkLabel(opts_frame, text="Modo de ejecución:", font=font_label)\
-            .grid(row=0, column=0, sticky="w", padx=10, pady=10)
-
-        self.radio_all = ctk.CTkRadioButton(
-            opts_frame, text="Crear todos", variable=self.mode_var, value="all",
-            command=self._on_mode_change, font=font_label
-        )
-        self.radio_single = ctk.CTkRadioButton(
-            opts_frame, text="Crear uno", variable=self.mode_var, value="single",
-            command=self._on_mode_change, font=font_label
-        )
-        self.radio_all.grid(row=0, column=1, sticky="w", padx=10, pady=10)
-        self.radio_single.grid(row=0, column=2, sticky="w", padx=10, pady=10)
-
-        ctk.CTkLabel(opts_frame, text="Anexo:", font=font_label)\
-            .grid(row=0, column=3, sticky="e", padx=10, pady=10)
-        self.combo_anexo = ctk.CTkComboBox(
-            opts_frame,
-            values=[f"Anexo {n}" for n in ANEXO_CHOICES],
-            command=self._on_anexo_select, width=160, height=38, font=font_label
-        )
-        self.combo_anexo.set(f"Anexo {ANEXO_CHOICES[0]}")
-        self.combo_anexo.configure(state="disabled")
-        self.combo_anexo.grid(row=0, column=4, sticky="w", padx=10, pady=10)
-
-        # Mes / Año
-        ctk.CTkLabel(opts_frame, text="Mes:", font=font_label)\
-            .grid(row=1, column=0, sticky="w", padx=10, pady=(0, 10))
-        month_names = [
-            ("01", "01 - Enero"), ("02", "02 - Febrero"), ("03", "03 - Marzo"),
-            ("04", "04 - Abril"), ("05", "05 - Mayo"), ("06", "06 - Junio"),
-            ("07", "07 - Julio"), ("08", "08 - Agosto"), ("09", "09 - Septiembre"),
-            ("10", "10 - Octubre"), ("11", "11 - Noviembre"), ("12", "12 - Diciembre"),
-        ]
-        self.combo_month = ctk.CTkComboBox(
-            opts_frame,
-            values=[label for _val, label in month_names],
-            width=180, height=38, font=font_label,
-            command=lambda v: self.month_var.set(v.split(" - ")[0])
-        )
-        try:
-            idx = int(self.month_var.get()) - 1
-        except Exception:
-            idx = 0
-        self.combo_month.set(month_names[idx][1])
-        self.combo_month.grid(row=1, column=1, sticky="w", padx=10, pady=(0, 10))
-
-        ctk.CTkLabel(opts_frame, text="Año:", font=font_label)\
-            .grid(row=1, column=2, sticky="e", padx=10, pady=(0, 10))
-        year_now = datetime.now().year
-        years = [str(y) for y in range(year_now - 50, year_now + 50)]
-        self.combo_year = ctk.CTkComboBox(
-            opts_frame,
-            values=years,
-            width=120, height=38, font=font_label,
-            command=lambda v: self.year_var.set(int(v))
-        )
-        self.combo_year.set(str(self.year_var.get()))
-        self.combo_year.grid(row=1, column=3, sticky="w", padx=10, pady=(0, 10))
-
-        opts_frame.grid_columnconfigure(2, weight=1)
-        # Ámbito de centros
-        ctk.CTkLabel(opts_frame, text="Ámbito de centros:", font=font_label)\
-            .grid(row=2, column=0, sticky="w", padx=10, pady=(10, 10))
-
-        self.radio_centers_all = ctk.CTkRadioButton(
-            opts_frame, text="Todos", variable=self.center_mode, value="all",
-            command=self._on_center_mode_change, font=font_label
-        )
-        self.radio_centers_one = ctk.CTkRadioButton(
-            opts_frame, text="Solo centro(s):", variable=self.center_mode, value="one",
-            command=self._on_center_mode_change, font=font_label
-        )
-
-        self.radio_centers_all.grid(row=2, column=1, sticky="w", padx=10, pady=(10, 10))
-        self.radio_centers_one.grid(row=2, column=2, sticky="w", padx=10, pady=(10, 10))
-
-        self.entry_center = ctk.CTkEntry(
-            opts_frame,
-            textvariable=self.center_value,
-            width=240,
-            height=38,
-            placeholder_text="C0001-C0010 o C0001, C0010"
-        )
-        self.entry_center.grid(row=2, column=3, sticky="w", padx=10, pady=(10, 10))
-        self.entry_center.configure(state="disabled")
-
-        # Botonera
-        btn_frame = ctk.CTkFrame(self.tab_generacion)
-        btn_frame.pack(fill="x", **pad)
-
-        self.btn_run = ctk.CTkButton(btn_frame, text="Ejecutar", command=self._on_run, width=140, height=40, font=font_btn)
-        self.btn_stop = ctk.CTkButton(btn_frame, text="Detener ejecución", command=self._on_stop,
-                                      width=180, height=40, font=font_btn, state="disabled")
-        self.btn_exit = ctk.CTkButton(btn_frame, text="Salir", command=self._on_close, width=120, height=40, font=font_btn)
-
-        self.btn_run.pack(side="left", padx=8, pady=12)
-        self.btn_stop.pack(side="left", padx=8, pady=12)
-        self.btn_exit.pack(side="right", padx=8, pady=12)
-
-        # Logs (solo para generación, no terminal)
-        ctk.CTkLabel(self.tab_generacion, text="Historial de ejecución:", font=ctk.CTkFont(size=15, weight="bold")).pack(**pad, anchor="w")
-        self.txt_logs = ctk.CTkTextbox(self.tab_generacion, height=360, font=font_log)
-        self.txt_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
-        self._log("Listo. Configura las carpetas y el modo, luego pulsa 'Ejecutar'.")
-
-
-    def _log_terminal(self, text: str) -> None:
-        self.txt_terminal.configure(state="normal")
-        self.txt_terminal.insert("end", text + "\n")
-        self.txt_terminal.see("end")
-        self.txt_terminal.configure(state="disabled")
+        # def _build_widgets(self) -> None:
+        #     # Esta función ha sido eliminada para evitar la duplicación de la interfaz de generación de anexos.
 
     # ----- estado (tk variables) -----
 
