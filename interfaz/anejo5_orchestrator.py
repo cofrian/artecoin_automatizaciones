@@ -79,6 +79,12 @@ def main():
     parser.add_argument("--center", default=None)
     args = parser.parse_args()
 
+    # Obtener el directorio donde están los scripts
+    script_dir = Path(__file__).parent
+    extraer_datos_script = script_dir / 'extraer_datos_word.py'
+    render_a3_script = script_dir / 'render_a3.py'
+    html2pdf_script = script_dir / 'html2pdf_a3_fast.py'
+
     dirs = create_temp_dirs()
     print(f"[Anejo 5] Carpeta temporal creada: {dirs['base']}")
 
@@ -94,7 +100,7 @@ def main():
         print(f"[Anejo 5] Encontrados {len(excel_files)} archivos Excel para procesar")
         for excel_file in excel_files:
             print(f"[Anejo 5] Procesando Excel: {excel_file.name}")
-            cmd1 = [sys.executable, '-u', 'extraer_datos_word.py',
+            cmd1 = [sys.executable, '-u', str(extraer_datos_script),
                     '--no-interactivo',
                     '--xlsx', str(excel_file),
                     '--fotos-root', args.photos_dir,
@@ -130,7 +136,7 @@ def main():
         copy_separated_jsons_to_base(dirs['json'])
     else:
         # Archivo único (comportamiento original)
-        cmd1 = [sys.executable, '-u', 'extraer_datos_word.py',
+        cmd1 = [sys.executable, '-u', str(extraer_datos_script),
                 '--no-interactivo',
                 '--xlsx', args.excel_dir,
                 '--fotos-root', args.photos_dir,
@@ -165,7 +171,7 @@ def main():
         copy_separated_jsons_to_base(dirs['json'])
 
     # 2. render_a3.py
-    cmd2 = [sys.executable, '-u', 'render_a3.py',
+    cmd2 = [sys.executable, '-u', str(render_a3_script),
             '--data', dirs['json'],
             '--out', dirs['html'],
             '--tpl', args.html_templates_dir]
@@ -193,7 +199,7 @@ def main():
 
     # 3. html2pdf_a3_fast.py - usar máximo concurrency disponible con mínimo de 16
     max_concurrency = max(os.cpu_count() or 16, 16)
-    cmd3 = [sys.executable, '-u', 'html2pdf_a3_fast.py',
+    cmd3 = [sys.executable, '-u', str(html2pdf_script),
             '--data', dirs['html'],
             '--out', dirs['pdf'],
             '--concurrency', str(max_concurrency),

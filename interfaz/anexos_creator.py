@@ -39,7 +39,17 @@ class Anexo5Generator:
         """
         import subprocess
         import sys
-        args = [sys.executable, '-u', 'anejo5_orchestrator.py',
+        import os
+        
+        # Buscar anejo5_orchestrator.py en la misma carpeta que este script
+        script_dir = Path(__file__).parent
+        orchestrator_path = script_dir / 'anejo5_orchestrator.py'
+        
+        if not orchestrator_path.exists():
+            logger.error(f"[ERROR] No se encontró anejo5_orchestrator.py en {orchestrator_path}")
+            return
+        
+        args = [sys.executable, '-u', str(orchestrator_path),
                 '--excel-dir', str(self.config.excel_dir),
                 '--photos-dir', str(self.config.photos_dir or ''),
                 '--html-templates-dir', str(self.config.html_templates_dir or ''),
