@@ -504,6 +504,12 @@ class AnexosApp(ctk.CTk):
         self.btn_stop.pack(side="left", padx=8, pady=12)
         self.btn_exit.pack(side="right", padx=8, pady=12)
 
+        # Logs (solo para generación, no terminal)
+        ctk.CTkLabel(self.tab_generacion, text="Historial de ejecución:", font=ctk.CTkFont(size=15, weight="bold")).pack(**pad, anchor="w")
+        self.txt_logs = ctk.CTkTextbox(self.tab_generacion, height=360, font=font_log)
+        self.txt_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
+        self._log("Listo. Configura las carpetas y el modo, luego pulsa 'Ejecutar'.")
+
 
     def _log_terminal(self, text: str) -> None:
         self.txt_terminal.configure(state="normal")
