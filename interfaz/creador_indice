@@ -1,0 +1,125 @@
+import re
+from docxtpl import DocxTemplate
+from pathlib import Path
+from PyPDF2 import PdfReader
+import tkinter as tk
+from tkinter import filedialog
+
+def contar_paginas_pdf(pdf_path):
+    try:
+        reader = PdfReader(str(pdf_path))
+        return len(reader.pages)
+    except Exception as e:
+        print(f"Error leyendo PDF {pdf_path}: {e}")
+        return 0
+
+def seleccionar_carpeta():
+    root = tk.Tk()
+    root.withdraw()
+    carpeta = filedialog.askdirectory(title="Selecciona la carpeta del centro")
+    root.destroy()
+    return carpeta
+
+def _titulo_compuesto(anejo):
+    numero_txt = str(anejo.get("numero", "")).strip()
+    m = re.search(r"\d+", numero_txt)
+    num = m.group(0) if m else numero_txt
+    base = str(anejo.get("titulo", "")).replace('_', '').strip()
+    return f"ANEJO {num}: {base}".upper()
+
+def calcular_paginas_inicio(anexos, auditoria_paginas, offset_memoria=3, ancho_linea=86):
+    # offset_memoria=3: la memoria empieza en la página 3, los anejos después de la memoria
+    pagina = offset_memoria + int(auditoria_paginas)
+    out = []
+    for a in anexos:
+        ext = int(a.get("extension", 0))
+        item = {**a}
+        item["titulo_original"] = a.get("titulo", "")
+        titulo = _titulo_compuesto(a).rstrip()
+        import unicodedata
+        def visual_len(s):
+            return sum(1 for c in s if unicodedata.category(c)[0] != 'C')
+        l = visual_len(titulo)
+        if l < ancho_linea:
+            titulo = titulo + ("_" * (ancho_linea - l))
+        else:
+            count = 0
+            res = ''
+            for c in titulo:
+                if count >= ancho_linea:
+                    break
+                if unicodedata.category(c)[0] != 'C':
+                    count += 1
+                res += c
+            titulo = res
+        item["titulo"] = titulo
+        item["pagina_inicio"] = pagina
+        item["e"] = pagina
+        out.append(item)
+        pagina += ext
+    return out
+
+def render_indice_general(template_path, output_path, auditoria_paginas, anexos,
+                          mostrar_inicio_doc1=True, offset_memoria=3, ancho_linea=86):
+    doc = DocxTemplate(str(template_path))
+    anexos_calc = calcular_paginas_inicio(anexos, auditoria_paginas, offset_memoria=offset_memoria, ancho_linea=ancho_linea)
+    contexto = {
+        "e_aud": offset_memoria,  # La memoria (DOC. Nº1) empieza en la página 3
+        "anexos": anexos_calc,
+    }
+    doc.render(contexto)
+    doc.save(str(output_path))
+
+# --- Ejecución automática con títulos fijos y solo anejos existentes ---
+TITULOS_FIJOS = [
+    "METODOLOGÍA",
+    "FACTURACIÓN ENERGÉTICA",
+    "INVENTARIO ENERGÉTICO",
+    "INVENTARIO SISTEMA CONSTRUCTIVO",
+    "REPORTAJE FOTOGRÁFICO",
+    "CERTIFICADOS ENERGÉTICOS",
+    "PLANOS"
+]
+
+base = Path(r"Z:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\interfaz_anejos_final\word\anexos")
+template = base / "001_INDICE GENERAL_PLANTILLA.docx"
+salida   = base / "001_INDICE_GENERAL_COMPLETADO.docx"
+
+carpeta_centro = seleccionar_carpeta()
+if carpeta_centro:
+    ruta = Path(carpeta_centro)
+    # Portada y auditoría
+    portada = None
+    for f in ruta.glob('*.pdf'):
+        if 'PORTADA' in f.stem.upper():
+            portada = f
+            break
+    portada_paginas = contar_paginas_pdf(portada) if portada else 1
+    auditoria = None
+    for f in ruta.glob('*.pdf'):
+        if portada and f == portada:
+            continue
+        auditoria = f
+        break
+    auditoria_paginas = contar_paginas_pdf(auditoria) if auditoria else 0
+    # Anejos: solo los que existen
+    anejos_dir = ruta / 'ANEJOS'
+    anexos = []
+    if anejos_dir.exists():
+        pdfs_anejos = list(anejos_dir.glob('*.pdf'))
+        for i, titulo_fijo in enumerate(TITULOS_FIJOS, 1):
+            patron = f"{i:02d}_ANEJO {i}."
+            encontrados = [f for f in pdfs_anejos if f.name.startswith(patron)]
+            if encontrados:
+                anejo_file = encontrados[0]
+                paginas = contar_paginas_pdf(anejo_file)
+                anexos.append({
+                    'numero': str(i),
+                    'titulo': titulo_fijo,
+                    'extension': paginas
+                })
+    # Solo se incluyen los anejos que existen
+    render_indice_general(template, salida, auditoria_paginas, anexos, offset_memoria=3, ancho_linea=86)
+    print(f"Generado: {salida}")
+else:
+    print("No se seleccionó ninguna carpeta.")
