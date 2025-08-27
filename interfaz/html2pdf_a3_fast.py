@@ -10,6 +10,7 @@ Salida:
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 from urllib.parse import quote
@@ -138,7 +139,7 @@ async def render_htmls_to_pdfs(htmls, data_root, out_root, args):
     total = len(htmls)
     done_counter = 0
     lock = asyncio.Lock()
-    sem = asyncio.Semaphore(max(1, args.concurrency))
+    sem = asyncio.Semaphore(max(16, args.concurrency))
 
     block_types = set(t.strip().lower() for t in args.block.split(",") if t.strip())
 
@@ -203,6 +204,9 @@ async def render_htmls_to_pdfs(htmls, data_root, out_root, args):
     return rendered
 
 def parse_args():
+    # Obtener el máximo número de hilos/cores disponibles con mínimo de 16
+    max_concurrency = max(os.cpu_count() or 16, 16)
+    
     ap = argparse.ArgumentParser(description="HTML → PDF A3 (Chromium/Playwright) + merges por sección **por centro**")
     ap.add_argument("--data", required=True, help="Carpeta raíz con los .html generados")
     ap.add_argument("--out", default=None, help="Carpeta de salida (default: <data>_pdf)")
@@ -212,7 +216,7 @@ def parse_args():
     ap.add_argument("--ignore-css-page", action="store_true",
                     help="Ignorar @page del CSS y forzar A3 landscape desde Chromium")
 
-    ap.add_argument("--concurrency", type=int, default=4, help="Número de páginas en paralelo (default 4)")
+    ap.add_argument("--concurrency", type=int, default=max_concurrency, help=f"Número de páginas en paralelo (default {max_concurrency} - máximo disponible)")
     ap.add_argument("--log-every", type=int, default=10, help="Frecuencia de logs de progreso (default 10)")
     ap.add_argument("--block", default="", help="Tipos de recurso a bloquear separados por coma: image,font,media,stylesheet,script")
     ap.add_argument("--chromium-arg", action="append", default=[], help="Argumentos extra para Chromium (repetible)")

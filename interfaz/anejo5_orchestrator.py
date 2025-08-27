@@ -191,12 +191,14 @@ def main():
         print(f"[ERROR] render_a3.py falló con código {p2.returncode}")
         sys.exit(2)
 
-    # 3. html2pdf_a3_fast.py
+    # 3. html2pdf_a3_fast.py - usar máximo concurrency disponible con mínimo de 16
+    max_concurrency = max(os.cpu_count() or 16, 16)
     cmd3 = [sys.executable, '-u', 'html2pdf_a3_fast.py',
             '--data', dirs['html'],
             '--out', dirs['pdf'],
+            '--concurrency', str(max_concurrency),
             '--caratulas-dir', args.caratulas_dir]
-    print(f"[Anejo 5] Ejecutando: {' '.join(cmd3)}")
+    print(f"[Anejo 5] Ejecutando con concurrency={max_concurrency}: {' '.join(cmd3)}")
     
     # Configurar entorno para UTF-8
     env = os.environ.copy()
