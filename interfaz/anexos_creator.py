@@ -130,11 +130,10 @@ class RunConfig:
     # Acción a realizar
     action: str = "generate"  # "generate" | "move-to-nas"
 
-    # --- parámetros GENERATE (opcionales si action=move-to-nas) ---
+    # --- GENERATE ---
     excel_dir: Optional[Path] = None
     word_dir: Optional[Path] = None
-    mode: Optional[str] = None  # "all" | "single"
-    anexo: Optional[int] = None
+    anexos: Optional[str] = None          # expresión "1-3, 6"
     month: Optional[str] = None
     year: Optional[int] = None
     html_templates_dir: Optional[Path] = None
@@ -145,10 +144,11 @@ class RunConfig:
     center: Optional[str] = None
     centers: Optional[str] = None
 
-    # --- parámetros MOVE-TO-NAS ---
-    local_out_root: Optional[Path] = None   # raíz local con Cxxxx(/anexos)
-    nas_centers_dir: Optional[Path] = None  # carpeta NAS con 01_Cxxxx_* / 02_Cxxxx_*
-    dry_run: bool = False                   # simular
+    # --- MOVE-TO-NAS ---
+    local_out_root: Optional[Path] = None
+    nas_centers_dir: Optional[Path] = None
+    dry_run: bool = False
+
 
 
 
@@ -653,9 +653,6 @@ class DefaultWordExporter:
 
             # Cerrar Word
             word_app.Quit()
-            logger.info(
-                f"   ✓ Campos actualizados en {len([p for p in doc_paths if Path(p).exists()])} documentos"
-            )
 
         except Exception as e:
             logger.error(f"   ! Error general en actualización de campos: {e}")
@@ -1252,6 +1249,31 @@ def parse_centers_expr(expr: Optional[str]) -> Optional[set[str]]:
                 out.add(cid)
     return out or None
 
+def parse_anexos_expr(expr: Optional[str]) -> Optional[list[int]]:
+    """Parsea una expresión de anexos como '1-3, 6' -> [1,2,3,6]. Rango válido 1..7."""
+    if not expr:
+        return None
+    s = expr.strip()
+    if not s:
+        return None
+    out: set[int] = set()
+    parts = [p.strip() for p in s.split(",")] if "," in s else [s]
+    for part in parts:
+        if not part:
+            continue
+        if "-" in part:
+            a, b = [x.strip() for x in part.split("-", 1)]
+            if a.isdigit() and b.isdigit():
+                ai, bi = int(a), int(b)
+                if ai > bi:
+                    ai, bi = bi, ai
+                for n in range(ai, bi + 1):
+                    out.add(n)
+        else:
+            if part.isdigit():
+                out.add(int(part))
+    out = {n for n in out if 1 <= n <= 7}
+    return sorted(out) or None
 
 def get_target_centers_from_config(cfg) -> Optional[set[str]]:
     """Obtiene el conjunto de centros objetivo a partir de la config.
@@ -1319,11 +1341,7 @@ def request_month_and_year(
                 raise ValueError(f"Nombre de mes inválido: {config_month}")
 
         year = config_year
-        if not (now.year - 5 <= year <= now.year + 5):
-            raise ValueError(
-                f"Año inválido: {year}. Debe estar entre {now.year - 5} y {now.year + 5}."
-            )
-
+        
         logger.info(
             f"Usando configuración: {month_name} ({month_num if 'month_num' in locals() else 'N/A'}), {year}"
         )
@@ -1587,8 +1605,7 @@ class Anexo3Generator:
                 ]
             )
 
-            safe_center = clean_name(str(center))
-            out_name = f"Anexo 3 {safe_center}.docx"
+            out_name = "03_ANEJO 3. INVENTARIO ENERGETICO.docx"
             out_path = self.out.build_output_docx_path(CONFIG, center_id, out_name)  # type: ignore[name-defined]
             doc.save(str(out_path))
 
@@ -1702,8 +1719,7 @@ class Anexo2Generator:
             doc.render(ctx)
 
             center_id = self.excel.extract_center_id(dfs)
-            safe_center = clean_name(center)
-            out_name = f"Anexo 2 {safe_center}.docx"
+            out_name = "02_ANEJO 2. FACTURACION ENERGETICA.docx"
             out_path = self.out.build_output_docx_path(CONFIG, center_id, out_name)  # type: ignore[name-defined]
             doc.save(str(out_path))
 
@@ -1818,8 +1834,7 @@ class Anexo4Generator:
 
             center_id = DefaultExcelRepository.extract_center_id([df_envol_grupo])
 
-            safe_center = clean_name(str(center))
-            out_name = f"Anexo 4 {safe_center}.docx"
+            out_name = "04_ANEJO 4. INVENTARIO  CONSTRUCTIVO.docx"
             out_path = self.out.build_output_docx_path(CONFIG, center_id, out_name)  # type: ignore[name-defined]
             doc.save(str(out_path))
 
@@ -1916,9 +1931,6 @@ class Anexo6Generator:
             doc.render({"mes": month_name, "anio": year})
             doc.save(str(temp_docx))
 
-            # Actualizar campos de Word
-            self.word.update_word_fields_bulk([str(temp_docx)])
-
             # Convertir a PDF
             app, word_doc = self.word.open_document(temp_docx, read_only=True)
             try:
@@ -1971,10 +1983,9 @@ class Anexo6Generator:
 
             # Extraer información del edificio
             id_centro, nombre_limpio = self._extract_building_info(building_dir)
-            safe_name = clean_name(nombre_limpio)
 
             # Crear archivo de salida
-            output_filename = f"Anexo 6 {safe_name}.pdf"
+            output_filename = "06_ANEJO 6. CERTIFICADOS ENERGETICOS.pdf"
             output_path = self.out.build_output_docx_path(
                 CONFIG,  # type: ignore[name-defined]
                 id_centro,
@@ -2256,10 +2267,9 @@ class Anexo7Generator:
 
             # Extraer información del edificio
             id_centro, nombre_limpio = self._extract_building_info(building_dir)
-            safe_name = clean_name(nombre_limpio)
 
             # Crear archivo de salida
-            output_filename = f"Anexo 7 {safe_name}.pdf"
+            output_filename = "07_ANEJO 7. PLANOS.pdf"
             output_path = self.out.build_output_docx_path(
                 CONFIG,  # type: ignore[name-defined]
                 id_centro,
@@ -2595,67 +2605,50 @@ def run_application(config: RunConfig) -> int:
         templates, word, pdf, excel, out, config.cee_dir, config.plans_dir, config
     )
 
-    # Validaciones mínimas (la GUI ya valida en capa anterior)
+    # Validaciones mínimas
     if not config.excel_dir.is_dir():
         logger.error("La carpeta de Excel no existe o no es válida.")
         return 2
     excel_files = [
-        p
-        for p in config.excel_dir.iterdir()
+        p for p in config.excel_dir.iterdir()
         if p.suffix.lower() in (".xlsx", ".xlsm", ".xls")
     ]
 
-    # Modo ejecución
+    # Determinar anexos objetivo desde la expresión (por defecto 2-7)
+    requested = parse_anexos_expr(config.anexos) or list(range(2, 8))
+    # Implementados: 2..7. El 1 se ignora (plantilla fija, no requiere generación)
     implemented = [2, 3, 4, 5, 6, 7]
-    try:
-        if config.mode == "all":
-            target_anexos = implemented
-        else:
-            if config.anexo is None:
-                logger.error("Debes indicar --anexo N cuando --mode single.")
-                return 2
-            target_anexos = [config.anexo]
-        logger.info(f"Anexos seleccionados: {target_anexos}")
-    except Exception as e:
-        logger.error(f"Error interpretando modo/anexo: {e}")
-        return 2
+    target_anexos = [n for n in requested if n in implemented]
+    skipped = sorted(set(requested) - set(target_anexos))
+    logger.info(f"Anexos seleccionados: {requested}")
+    if skipped:
+        logger.info(f"(Se omiten no implementados/no necesarios): {skipped}")
 
     # Validaciones específicas por anexo
-    for n in target_anexos:
-        if n == 6:
-            # Para Anexo 6, validar que existe la carpeta CEE
-            cee_dir = config.cee_dir or (Path(__file__).resolve().parent.parent / "CEE")
-            if not cee_dir.exists():
-                logger.error(f"Para el Anexo 6 se requiere la carpeta CEE: {cee_dir}")
-                return 2
-        elif n == 7:
-            # Para Anexo 7, validar que existe la carpeta de planos
-            plans_dir = config.plans_dir or (
-                Path(__file__).resolve().parent.parent / "PLANOS"
-            )
-            if not plans_dir.exists():
-                logger.error(
-                    f"Para el Anexo 7 se requiere la carpeta de planos: {plans_dir}"
-                )
-                return 2
+    if 6 in target_anexos:
+        cee_dir = config.cee_dir or (Path(__file__).resolve().parent.parent / "CEE")
+        if not cee_dir.exists():
+            logger.error(f"Para el Anexo 6 se requiere la carpeta CEE: {cee_dir}")
+            return 2
+    if 7 in target_anexos:
+        plans_dir = config.plans_dir or (Path(__file__).resolve().parent.parent / "PLANOS")
+        if not plans_dir.exists():
+            logger.error(f"Para el Anexo 7 se requiere la carpeta de planos: {plans_dir}")
+            return 2
 
-    # Separar anexos que requieren Excel de los que no (Anejo 5 tampoco requiere Excel directo)
+    # Separar anexos que requieren Excel de los que no (5,6,7 no requieren Excel directo)
     excel_dependent_anexos = [n for n in target_anexos if n in (2, 3, 4)]
     excel_independent_anexos = [n for n in target_anexos if n in (5, 6, 7)]
 
-    # Validar que hay archivos Excel solo si hay anexos que los requieren
+    # Validar Excel solo si hay anexos dependientes
     if excel_dependent_anexos and not excel_files:
         logger.error("La carpeta de Excel no contiene archivos .xls/.xlsx/.xlsm.")
         return 2
 
-    # Procesar anexos que NO requieren Excel (6 y 7) - ejecutar solo una vez
+    # Anexos independientes de Excel (5, 6, 7) — ejecutar una vez
     if excel_independent_anexos:
-        logger.info(
-            f"\n=== Procesando anexos independientes de Excel: {excel_independent_anexos} ==="
-        )
-        # Usar un archivo Excel dummy o None - el generador lo ignorará
-        dummy_excel = Path("dummy.xlsx")  # Path ficticio que nunca se usará
-
+        logger.info(f"\n=== Procesando anexos independientes de Excel: {excel_independent_anexos} ===")
+        dummy_excel = Path("dummy.xlsx")
         for n in excel_independent_anexos:
             try:
                 generator = factory.get(n)
@@ -2669,9 +2662,8 @@ def run_application(config: RunConfig) -> int:
                 return 3
             except Exception as e:
                 logger.error(f"Error generando Anexo {n}: {e}")
-                # seguir con otros anexos
 
-    # Procesar anexos que SÍ requieren Excel (2, 3, 4) - ejecutar para cada Excel
+    # Anexos dependientes de Excel (2, 3, 4) — ejecutar por cada Excel
     if excel_dependent_anexos:
         for xfile in excel_files:
             logger.info(f"\n=== Procesando: {xfile.name} ===")
@@ -2688,7 +2680,6 @@ def run_application(config: RunConfig) -> int:
                     return 3
                 except Exception as e:
                     logger.error(f"Error generando Anexo {n}: {e}")
-                    # seguir con otros anexos/archivos
 
     logger.info("\n--- Proceso finalizado correctamente ---")
     return 0
@@ -2777,11 +2768,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
     parser.add_argument("--action", choices=["generate", "move-to-nas"], default="generate",
                         help="Acción a realizar")
 
-    # --- GENERATE (opcionales si action=move-to-nas) ---
+    # --- GENERATE ---
     parser.add_argument("--excel-dir", help="Carpeta con Excels de entrada")
     parser.add_argument("--word-dir", help="Carpeta con plantillas DOCX (opcional)")
-    parser.add_argument("--mode", choices=["all", "single"], help="Ejecución: todos o uno")
-    parser.add_argument("--anexo", type=int, help="Número de anexo cuando --mode single")
+    parser.add_argument("--anexos", help='Expresión de anexos a generar. Ej.: "1-3, 6" (por defecto 2-7)')
     parser.add_argument("--month", help="Mes (nombre o 1-12)")
     parser.add_argument("--year", type=int, help="Año")
     parser.add_argument("--html-templates-dir", help="Plantillas HTML (opcional)")
@@ -2807,8 +2797,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
         # generate
         excel_dir=_p(ns.excel_dir),
         word_dir=_p(ns.word_dir),
-        mode=ns.mode,
-        anexo=ns.anexo,
+        anexos=ns.anexos,
         month=ns.month,
         year=ns.year,
         html_templates_dir=_p(ns.html_templates_dir),
@@ -2824,11 +2813,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
         dry_run=bool(ns.dry_run),
     )
 
-    # Validación mínima condicionada por acción:
     if cfg.action == "generate":
-        if not cfg.excel_dir or not cfg.mode:
-            parser.error("--excel-dir y --mode son obligatorios cuando action=generate")
+        if not cfg.excel_dir:
+            parser.error("--excel-dir es obligatorio cuando action=generate")
     return cfg
+
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ensure_utf8_console()
@@ -2837,11 +2826,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config = parse_args(argv)
         if config.action == "move-to-nas":
             return run_move_to_nas(config)
-        else:
-            # Asegurar valores por defecto coherentes
-            if not config.mode:
-                object.__setattr__(config, "mode", "all")
-            return run_application(config)
+        return run_application(config)
     except SystemExit as e:
         return int(e.code or 2)
     except Exception as e:

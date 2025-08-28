@@ -29,6 +29,7 @@ import time
 import queue
 import threading
 import subprocess
+import ctypes
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Tuple, List
@@ -42,7 +43,23 @@ from tkinter import filedialog, messagebox, StringVar, IntVar
 
 APP_NAME = "Anexos GUI"
 CONFIG_FILENAME = os.path.join(os.path.expanduser("~"), ".anexos_gui_config.json")
-ANEXO_CHOICES = [2, 3, 4, 5, 6, 7]
+
+def set_uniform_scaling() -> None:
+    """
+    Fuerza un escalado uniforme para que la UI tenga el mismo tamaño en todas las pantallas.
+    - En Windows: fija la app como 'System DPI Aware' (constante por sesión) y
+      evita el reescalado por monitor.
+    """
+    try:
+        if sys.platform.startswith("win"):
+            try:
+                # 1 = PROCESS_SYSTEM_DPI_AWARE (uniforme en todos los monitores)
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                # Fallback para versiones antiguas
+                ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 
 # ---------------------------
@@ -61,9 +78,8 @@ class RunOptions:
     cee_dir: Optional[str]
     plans_dir: Optional[str]
 
-    # Modo de ejecución
-    mode: str                  # "all" | "single"
-    anexo: Optional[int]       # 2..7 si mode == "single"
+    # Selección de anexos (rango/lista tipo "1-3, 6")
+    anexos_expr: Optional[str]
 
     # Parámetros fecha
     month: Optional[int]
@@ -71,6 +87,7 @@ class RunOptions:
 
     # Expresión de centros (rango/lista)
     center: Optional[str] = None
+
 
 
 @dataclass(frozen=True)
@@ -117,6 +134,31 @@ class Validator:
     """Valida coherencia de opciones antes de ejecutar (sin efectos colaterales)."""
 
     @staticmethod
+    def _parse_anexos_expr(expr: Optional[str]) -> Optional[list[int]]:
+        if not expr or not str(expr).strip():
+            return None
+        raw = str(expr).strip()
+        out: set[int] = set()
+        parts = [p.strip() for p in raw.split(",")] if "," in raw else [raw]
+        for part in parts:
+            if not part:
+                continue
+            if "-" in part:
+                a, b = [x.strip() for x in part.split("-", 1)]
+                if a.isdigit() and b.isdigit():
+                    ai, bi = int(a), int(b)
+                    if ai > bi:
+                        ai, bi = bi, ai
+                    for n in range(ai, bi + 1):
+                        out.add(n)
+            else:
+                if part.isdigit():
+                    out.add(int(part))
+        # Limitar a rango válido 1..7
+        out = {n for n in out if 1 <= n <= 7}
+        return sorted(out) or None
+
+    @staticmethod
     def validate_options(opts: RunOptions) -> Tuple[bool, str]:
         # Excel es obligatorio
         if not opts.excel_dir or not os.path.isdir(opts.excel_dir):
@@ -130,7 +172,7 @@ class Validator:
         if not has_excel:
             return False, "La carpeta de Excel no contiene archivos .xls/.xlsx/.xlsm."
 
-        # Validar mes/año si vienen informados
+        # Mes/año
         if opts.month is not None:
             try:
                 m = int(opts.month)
@@ -158,11 +200,11 @@ class Validator:
         if opts.plans_dir and not os.path.isdir(opts.plans_dir):
             return False, "La carpeta de planos indicada no existe."
 
-        if opts.mode == "single":
-            if opts.anexo not in ANEXO_CHOICES:
-                return False, "Selecciona un anexo válido (2 a 7)."
-
-        # output_dir es opcional: si no existe lo gestionamos en la capa de UI (preguntando si crear)
+        # Validar expresión de anexos si el usuario restringe
+        if opts.anexos_expr:
+            parsed = Validator._parse_anexos_expr(opts.anexos_expr)
+            if not parsed:
+                return False, "Expresión de anexos inválida. Ejemplos: 1-3, 6   o   2,3,4"
         return True, ""
 
     @staticmethod
@@ -269,10 +311,9 @@ class ProcessRunner:
         if opts.word_dir:
             cmd += ["--word-dir", opts.word_dir]
 
-        if opts.mode == "all":
-            cmd += ["--mode", "all"]
-        else:
-            cmd += ["--mode", "single", "--anexo", str(opts.anexo)]
+        # pasar rango/lista de anexos si el usuario restringe
+        if opts.anexos_expr:
+            cmd += ["--anexos", opts.anexos_expr]
 
         if opts.html_templates_dir:
             cmd += ["--html-templates-dir", opts.html_templates_dir]
@@ -294,6 +335,7 @@ class ProcessRunner:
             cmd += ["--centers", str(opts.center)]
 
         self._launch(cmd)
+
 
     # Acción: MOVE-TO-NAS
     def start_move(self, opts: MoveOptions) -> None:
@@ -356,6 +398,14 @@ class AnexosApp(ctk.CTk):
         ctk.set_widget_scaling(1.15)
         ctk.set_window_scaling(1.05)
 
+        ctk.set_widget_scaling(1.0)
+        ctk.set_window_scaling(1.0)
+        try:
+            # Escalado de fuentes Tk (evita variaciones por DPI del monitor)
+            self.tk.call("tk", "scaling", 1.0)
+        except Exception:
+            pass
+        
         self.title(APP_NAME)
         self.geometry("1200x850")
         self.minsize(980, 720)
@@ -363,22 +413,26 @@ class AnexosApp(ctk.CTk):
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.runner = ProcessRunner(self.log_queue)
 
+        # 1) IMPORTANTE: construir el estado ANTES de construir pestañas
         self._build_state()
 
-        # --- TabView para secciones ---
+        # 2) Tabs
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=10)
-        self.tab_terminal = self.tabs.add("Terminal")
         self.tab_generacion = self.tabs.add("Generación de Anejos")
         self.tab_move = self.tabs.add("Mover anexos al NAS")
+        self.tab_terminal = self.tabs.add("Historial de ejecución")
 
+        # 3) Vistas
         self._build_terminal_tab()
         self._build_generacion_tab()
         self._build_move_tab()
 
+        # 4) Config y ciclo de logs
         self._apply_saved_config()
         self._poll_logs()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
 
     # ---------- pestaña terminal ----------
     def _build_terminal_tab(self):
@@ -397,30 +451,46 @@ class AnexosApp(ctk.CTk):
 
     # ---------- pestaña generar ----------
     def _build_generacion_tab(self):
-        pad = {"padx": 14, "pady": 10}
-        font_title = ctk.CTkFont(size=22, weight="bold")
-        font_label = ctk.CTkFont(size=14)
-        font_btn = ctk.CTkFont(size=14)
-        font_log = ctk.CTkFont(size=13)
+        # Fuentes (más grandes)
+        pad = {"padx": 20, "pady": 18}
+        font_title = ctk.CTkFont(size=28, weight="bold")
+        font_label = ctk.CTkFont(size=18)
+        font_btn = ctk.CTkFont(size=18)
+        font_hint = ctk.CTkFont(size=18)
+        font_entry = ctk.CTkFont(size=17)
 
-        # Título
-        ctk.CTkLabel(self.tab_generacion, text="Interfaz de Anejos", font=font_title)\
-            .pack(**pad, anchor="w")
+        # === CONTENEDOR PRINCIPAL (ocupa TODO) ===
+        main = ctk.CTkFrame(self.tab_generacion)
+        main.pack(fill="both", expand=True, padx=12, pady=12)
+        # Grid del contenedor principal
+        main.grid_rowconfigure(0, weight=0)  # Título
+        main.grid_rowconfigure(1, weight=1)  # Paths
+        main.grid_rowconfigure(2, weight=1)  # Opciones
+        main.grid_rowconfigure(3, weight=0)  # Botonera
+        main.grid_columnconfigure(0, weight=1)
 
-        # Frame selección carpetas
-        paths_frame = ctk.CTkFrame(self.tab_generacion)
-        paths_frame.pack(fill="x", **pad)
+        # --- Título ---
+        ctk.CTkLabel(main, text="Interfaz de Anejos", font=font_title)\
+            .grid(row=0, column=0, sticky="w", **pad)
+
+        # --- Frame selección carpetas (EXPANDIBLE) ---
+        paths_frame = ctk.CTkFrame(main)
+        paths_frame.grid(row=1, column=0, sticky="nsew", **pad)
+        # Columnas: [label | entry expandible | botón]
+        paths_frame.grid_columnconfigure(0, weight=0)
+        paths_frame.grid_columnconfigure(1, weight=1)  # <- el entry crece horizontalmente
+        paths_frame.grid_columnconfigure(2, weight=0)
 
         def path_row(r: int, label: str, var: StringVar, browse_cmd, required: bool = False):
             lab_txt = f"{label}{' (obligatoria)' if required else ''}:"
             ctk.CTkLabel(paths_frame, text=lab_txt, font=font_label)\
                 .grid(row=r, column=0, sticky="w", padx=10, pady=10)
-            entry = ctk.CTkEntry(paths_frame, textvariable=var, width=620, height=38, state="disabled")
+            entry = ctk.CTkEntry(paths_frame, textvariable=var, height=46, font=font_entry, state="disabled")
             entry.grid(row=r, column=1, sticky="we", padx=10, pady=10)
-            ctk.CTkButton(paths_frame, text="Seleccionar...", command=browse_cmd, height=38, font=font_btn)\
-                .grid(row=r, column=2, padx=10, pady=10)
+            ctk.CTkButton(paths_frame, text="Seleccionar...", command=browse_cmd, height=46, font=font_btn)\
+                .grid(row=r, column=2, padx=10, pady=10, sticky="e")
 
-        # Filas
+        # Filas de rutas
         path_row(0, "Carpeta de Excel", self.excel_dir, self._choose_excel, required=True)
         path_row(1, "Carpeta de Word (plantillas)", self.word_dir, self._choose_word)
         path_row(2, "Carpeta de plantillas HTML", self.html_templates_dir, self._choose_html_templates)
@@ -430,40 +500,52 @@ class AnexosApp(ctk.CTk):
         path_row(6, "Carpeta de CEE", self.cee_dir, self._choose_cee)
         path_row(7, "Carpeta de planos", self.plans_dir, self._choose_plans)
 
-        paths_frame.grid_columnconfigure(1, weight=1)
+        # --- Frame opciones (EXPANDIBLE) ---
+        opts_frame = ctk.CTkFrame(main)
+        opts_frame.grid(row=2, column=0, sticky="nsew", **pad)
+        # Columnas: [label | col1 | col2 | col3 expandible]
+        opts_frame.grid_columnconfigure(0, weight=0)
+        opts_frame.grid_columnconfigure(1, weight=0)
+        opts_frame.grid_columnconfigure(2, weight=0)
+        opts_frame.grid_columnconfigure(3, weight=1)
 
-        # Frame opciones
-        opts_frame = ctk.CTkFrame(self.tab_generacion)
-        opts_frame.pack(fill="x", **pad)
+        # Ámbito de anexos
+        ctk.CTkLabel(opts_frame, text="Ámbito de anexos:", font=font_label)\
+            .grid(row=0, column=0, sticky="w", padx=10, pady=12)
 
-        ctk.CTkLabel(opts_frame, text="Modo de ejecución:", font=font_label)\
-            .grid(row=0, column=0, sticky="w", padx=10, pady=10)
-
-        self.radio_all = ctk.CTkRadioButton(
-            opts_frame, text="Crear todos", variable=self.mode_var, value="all",
-            command=self._on_mode_change, font=font_label
+        self.radio_ax_all = ctk.CTkRadioButton(
+            opts_frame, text="Todos (2-7)", variable=self.anexos_mode, value="all",
+            command=self._on_anexos_mode_change, font=font_label
         )
-        self.radio_single = ctk.CTkRadioButton(
-            opts_frame, text="Crear uno", variable=self.mode_var, value="single",
-            command=self._on_mode_change, font=font_label
+        self.radio_ax_one = ctk.CTkRadioButton(
+            opts_frame, text="Solo anexos:", variable=self.anexos_mode, value="one",
+            command=self._on_anexos_mode_change, font=font_label
         )
-        self.radio_all.grid(row=0, column=1, sticky="w", padx=10, pady=10)
-        self.radio_single.grid(row=0, column=2, sticky="w", padx=10, pady=10)
+        self.radio_ax_all.grid(row=0, column=1, sticky="w", padx=10, pady=12)
+        self.radio_ax_one.grid(row=0, column=2, sticky="w", padx=10, pady=12)
 
-        ctk.CTkLabel(opts_frame, text="Anexo:", font=font_label)\
-            .grid(row=0, column=3, sticky="e", padx=10, pady=10)
-        self.combo_anexo = ctk.CTkComboBox(
-            opts_frame,
-            values=[f"Anexo {n}" for n in ANEXO_CHOICES],
-            command=self._on_anexo_select, width=160, height=38, font=font_label
+        # Contenedor ayuda + entry ANEXOS
+        anx_box = ctk.CTkFrame(opts_frame, fg_color="transparent")
+        anx_box.grid(row=0, column=3, sticky="w", padx=10, pady=12)
+        anx_box.grid_columnconfigure(0, weight=0)  # <- no expandir
+
+        ctk.CTkLabel(
+            anx_box, text="Formato: 1-4, 6", font=font_hint, text_color=("gray50", "gray60")
+        ).grid(row=0, column=0, sticky="w")
+
+        self.entry_anexos = ctk.CTkEntry(
+            anx_box,
+            textvariable=self.anexos_value,
+            height=46,
+            font=font_entry,
+            width=300  # <- ancho fijo estilo "Año"
         )
-        self.combo_anexo.set(f"Anexo {ANEXO_CHOICES[0]}")
-        self.combo_anexo.configure(state="disabled")
-        self.combo_anexo.grid(row=0, column=4, sticky="w", padx=10, pady=10)
+        self.entry_anexos.grid(row=1, column=0, sticky="w", pady=(6, 0))  # <- no 'we'
+        self.entry_anexos.configure(state="disabled")
 
         # Mes / Año
         ctk.CTkLabel(opts_frame, text="Mes:", font=font_label)\
-            .grid(row=1, column=0, sticky="w", padx=10, pady=(0, 10))
+            .grid(row=1, column=0, sticky="w", padx=10, pady=(0, 20))
         month_names = [
             ("01", "01 - Enero"), ("02", "02 - Febrero"), ("03", "03 - Marzo"),
             ("04", "04 - Abril"), ("05", "05 - Mayo"), ("06", "06 - Junio"),
@@ -473,7 +555,7 @@ class AnexosApp(ctk.CTk):
         self.combo_month = ctk.CTkComboBox(
             opts_frame,
             values=[label for _val, label in month_names],
-            width=180, height=38, font=font_label,
+            height=46, font=font_label, width=220,  # Aumentado de default a 220
             command=lambda v: self.month_var.set(v.split(" - ")[0])
         )
         try:
@@ -481,26 +563,24 @@ class AnexosApp(ctk.CTk):
         except Exception:
             idx = 0
         self.combo_month.set(month_names[idx][1])
-        self.combo_month.grid(row=1, column=1, sticky="w", padx=10, pady=(0, 10))
+        self.combo_month.grid(row=1, column=1, sticky="w", padx=10, pady=(0, 20))
 
         ctk.CTkLabel(opts_frame, text="Año:", font=font_label)\
-            .grid(row=1, column=2, sticky="e", padx=10, pady=(0, 10))
+            .grid(row=1, column=2, sticky="e", padx=10, pady=(0, 12))
         year_now = datetime.now().year
         years = [str(y) for y in range(year_now - 50, year_now + 50)]
         self.combo_year = ctk.CTkComboBox(
             opts_frame,
             values=years,
-            width=120, height=38, font=font_label,
+            height=46, font=font_label, width=150,  # Aumentado de default a 150
             command=lambda v: self.year_var.set(int(v))
         )
         self.combo_year.set(str(self.year_var.get()))
-        self.combo_year.grid(row=1, column=3, sticky="w", padx=10, pady=(0, 10))
-
-        opts_frame.grid_columnconfigure(2, weight=1)
+        self.combo_year.grid(row=1, column=3, sticky="w", padx=10, pady=(0, 12))
 
         # Ámbito de centros
         ctk.CTkLabel(opts_frame, text="Ámbito de centros:", font=font_label)\
-            .grid(row=2, column=0, sticky="w", padx=10, pady=(10, 10))
+            .grid(row=2, column=0, sticky="w", padx=10, pady=(12, 12))
 
         self.radio_centers_all = ctk.CTkRadioButton(
             opts_frame, text="Todos", variable=self.center_mode, value="all",
@@ -510,41 +590,58 @@ class AnexosApp(ctk.CTk):
             opts_frame, text="Solo centro(s):", variable=self.center_mode, value="one",
             command=self._on_center_mode_change, font=font_label
         )
+        self.radio_centers_all.grid(row=2, column=1, sticky="w", padx=10, pady=(12, 12))
+        self.radio_centers_one.grid(row=2, column=2, sticky="w", padx=10, pady=(12, 12))
 
-        self.radio_centers_all.grid(row=2, column=1, sticky="w", padx=10, pady=(10, 10))
-        self.radio_centers_one.grid(row=2, column=2, sticky="w", padx=10, pady=(10, 10))
+        # Contenedor ayuda + entry CENTROS
+        ctr_box = ctk.CTkFrame(opts_frame, fg_color="transparent")
+        ctr_box.grid(row=2, column=3, sticky="w", padx=10, pady=(12, 12))
+        ctr_box.grid_columnconfigure(0, weight=0)  # <- no expandir
+
+        ctk.CTkLabel(
+            ctr_box, text="Formato: C0002-C0010, C0023, C0035", font=font_hint, text_color=("gray50", "gray60")
+        ).grid(row=0, column=0, sticky="w")
 
         self.entry_center = ctk.CTkEntry(
-            opts_frame,
+            ctr_box,
             textvariable=self.center_value,
-            width=240,
-            height=38,
-            placeholder_text="C0001-C0010 o C0001, C0010"
+            height=46,
+            font=font_entry,
+            width=300  # <- ancho fijo estilo "Año"
         )
-        self.entry_center.grid(row=2, column=3, sticky="w", padx=10, pady=(10, 10))
+        self.entry_center.grid(row=1, column=0, sticky="w", pady=(6, 0))  # <- no 'we'
         self.entry_center.configure(state="disabled")
 
-        # Botonera
-        btn_frame = ctk.CTkFrame(self.tab_generacion)
-        btn_frame.pack(fill="x", **pad)
+        # --- Botonera (abajo) ---
+        btn_frame = ctk.CTkFrame(main)
+        btn_frame.grid(row=3, column=0, sticky="ew", **pad)
+        btn_frame.grid_columnconfigure(0, weight=0)
+        btn_frame.grid_columnconfigure(1, weight=0)
+        btn_frame.grid_columnconfigure(2, weight=1)  # empuja el botón "Salir" a la derecha
 
-        self.btn_run = ctk.CTkButton(btn_frame, text="Ejecutar", command=self._on_run, width=140, height=40, font=font_btn)
+        self.btn_run = ctk.CTkButton(btn_frame, text="Ejecutar", command=self._on_run, height=48, font=font_btn)
         self.btn_stop = ctk.CTkButton(btn_frame, text="Detener ejecución", command=self._on_stop,
-                                      width=180, height=40, font=font_btn, state="disabled")
-        self.btn_exit = ctk.CTkButton(btn_frame, text="Salir", command=self._on_close, width=120, height=40, font=font_btn)
+                                    height=48, font=font_btn, state="disabled")
+        self.btn_exit = ctk.CTkButton(btn_frame, text="Salir", command=self._on_close, height=48, font=font_btn)
 
-        self.btn_run.pack(side="left", padx=8, pady=12)
-        self.btn_stop.pack(side="left", padx=8, pady=12)
-        self.btn_exit.pack(side="right", padx=8, pady=12)
+        self.btn_run.grid(row=0, column=0, padx=10, pady=12, sticky="w")
+        self.btn_stop.grid(row=0, column=1, padx=10, pady=12, sticky="w")
+        self.btn_exit.grid(row=0, column=2, padx=10, pady=12, sticky="e")
 
-        # Logs
-        ctk.CTkLabel(self.tab_generacion, text="Historial de ejecución:", font=ctk.CTkFont(size=15, weight="bold")).pack(**pad, anchor="w")
-        self.txt_logs = ctk.CTkTextbox(self.tab_generacion, height=360, font=font_log)
-        self.txt_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
-        self._log("Listo. Configura las carpetas y el modo, luego pulsa 'Ejecutar'.")
+
 
     # ---------- pestaña mover ----------
     def _build_move_tab(self):
+        # Defensa por si el estado no estaba creado aún
+        # for attr, default in (
+        #     ("mv_local_root", StringVar(value="")),
+        #     ("mv_nas_root", StringVar(value="")),
+        #     ("mv_centers_expr", StringVar(value="")),
+        #     ("mv_dry_run", ctk.BooleanVar(value=False)),
+        # ):
+        #     if not hasattr(self, attr):
+        #         setattr(self, attr, default)
+
         pad = {"padx": 14, "pady": 10}
         font_title = ctk.CTkFont(size=22, weight="bold")
         font_label = ctk.CTkFont(size=14)
@@ -610,19 +707,24 @@ class AnexosApp(ctk.CTk):
         self.plans_dir = StringVar(value="")
         self.caratulas_dir = StringVar(value="")  # carpeta de carátulas (Anejo 5)
 
-        self.mode_var = StringVar(value="all")
-        self.anexo_value = IntVar(value=ANEXO_CHOICES[0])
         now = datetime.now()
         self.month_var = StringVar(value=str(now.month).zfill(2))
         self.year_var = IntVar(value=now.year)
-        self.center_mode = ctk.StringVar(value="all")   # "all" | "one"
-        self.center_value = ctk.StringVar(value="")     # "C0001-C0010, C0003"
 
-        # Movimiento
+        # (rango/lista de anexos)
+        self.anexos_mode = ctk.StringVar(value="all")
+        self.anexos_value = ctk.StringVar(value="")  # "1-3, 6"
+
+        # Centros
+        self.center_mode = ctk.StringVar(value="all")
+        self.center_value = ctk.StringVar(value="")
+
+        # Movimiento (DEBEN existir antes de _build_move_tab)
         self.mv_local_root = StringVar(value="")
         self.mv_nas_root = StringVar(value="")
         self.mv_centers_expr = StringVar(value="")
         self.mv_dry_run = ctk.BooleanVar(value=False)
+
 
     # ----- helpers UI comunes -----
 
@@ -643,7 +745,44 @@ class AnexosApp(ctk.CTk):
             self.txt_mv_logs.see("end")
             self.txt_mv_logs.configure(state="disabled")
 
-        
+    def _snapshot_config(self) -> dict:
+        """Toma un snapshot del estado actual para persistir en ConfigStore."""
+        try:
+            month_val = int(str(self.month_var.get()).strip())
+        except Exception:
+            month_val = None
+        try:
+            year_val = int(str(self.year_var.get()).strip())
+        except Exception:
+            year_val = None
+
+        return {
+            # Generación
+            "excel_dir": (self.excel_dir.get() or "").strip(),
+            "word_dir": (self.word_dir.get() or "").strip(),
+            "html_templates_dir": (self.html_templates_dir.get() or "").strip(),
+            "photos_dir": (self.photos_dir.get() or "").strip(),
+            "output_dir": (self.output_dir.get() or "").strip(),
+            "cee_dir": (self.cee_dir.get() or "").strip(),
+            "plans_dir": (self.plans_dir.get() or "").strip(),
+            "month": month_val if month_val is not None else 1,
+            "year": year_val if year_val is not None else 2000,
+
+            # Anexos (si está en 'one' guardamos el texto, si no lo dejamos vacío)
+            "anexos_mode": self.anexos_mode.get(),
+            "anexos_expr": (self.anexos_value.get() or "").strip() if self.anexos_mode.get() == "one" else "",
+
+            # Centros (idem)
+            "centers_mode": self.center_mode.get(),
+            "centers": (self.center_value.get() or "").strip() if self.center_mode.get() == "one" else "",
+
+            # Movimiento
+            "mv_local_root": (self.mv_local_root.get() or "").strip(),
+            "mv_nas_root": (self.mv_nas_root.get() or "").strip(),
+            "mv_centers_expr": (self.mv_centers_expr.get() or "").strip(),
+            "mv_dry_run": bool(self.mv_dry_run.get()),
+        }
+
         
 
     # ----- browsers -----
@@ -701,19 +840,6 @@ class AnexosApp(ctk.CTk):
 
     # ----- eventos -----
 
-    def _on_mode_change(self) -> None:
-        # Habilitar/deshabilitar combo según modo
-        if self.mode_var.get() == "single":
-            self.combo_anexo.configure(state="normal")
-        else:
-            self.combo_anexo.configure(state="disabled")
-
-    def _on_anexo_select(self, value: str) -> None:
-        try:
-            self.anexo_value.set(int(value.split()[-1]))
-        except Exception:
-            self.anexo_value.set(ANEXO_CHOICES[0])
-
     def _on_center_mode_change(self) -> None:
         if self.center_mode.get() == "one":
             self.entry_center.configure(state="normal")
@@ -724,6 +850,18 @@ class AnexosApp(ctk.CTk):
         else:
             self.entry_center.configure(state="disabled")
             self.center_value.set("")
+    
+    def _on_anexos_mode_change(self) -> None:
+        if self.anexos_mode.get() == "one":
+            self.entry_anexos.configure(state="normal")
+            try:
+                self.entry_anexos.focus()
+            except Exception:
+                pass
+        else:
+            self.entry_anexos.configure(state="disabled")
+            self.anexos_value.set("")
+
 
     # ----- persistencia -----
 
@@ -731,9 +869,6 @@ class AnexosApp(ctk.CTk):
         cfg = ConfigStore.load()
 
         # Generación
-        self.center_mode.set(cfg.get("centers_mode", cfg.get("center_mode", "all")))
-        self.center_value.set(cfg.get("centers", cfg.get("center", "")))
-        self._on_center_mode_change()
         self.excel_dir.set(cfg.get("excel_dir", ""))
         self.word_dir.set(cfg.get("word_dir", ""))
         self.html_templates_dir.set(cfg.get("html_templates_dir", ""))
@@ -762,25 +897,24 @@ class AnexosApp(ctk.CTk):
         if hasattr(self, 'combo_year'):
             self.combo_year.set(str(y))
 
-        mode = cfg.get("mode", "all")
-        if mode not in ("all", "single"):
-            mode = "all"
-        self.mode_var.set(mode)
-        self._on_mode_change()
+        # Anexos
+        self.anexos_mode.set(cfg.get("anexos_mode", "all"))
+        saved_anexos = (cfg.get("anexos_expr", "") or "").strip()
+        self.anexos_value.set(saved_anexos if self.anexos_mode.get() == "one" else "")
+        self._on_anexos_mode_change()
 
-        try:
-            a = int(str(cfg.get("anexo", ANEXO_CHOICES[0])))
-        except Exception:
-            a = ANEXO_CHOICES[0]
-        self.anexo_value.set(a)
-        if hasattr(self, 'combo_anexo'):
-            self.combo_anexo.set(f"Anexo {a}")
+        # Centros
+        self.center_mode.set(cfg.get("centers_mode", "all"))
+        saved_centers = (cfg.get("centers", "") or "").strip()
+        self.center_value.set(saved_centers if self.center_mode.get() == "one" else "")
+        self._on_center_mode_change()
 
         # Movimiento
         self.mv_local_root.set(cfg.get("mv_local_root", ""))
         self.mv_nas_root.set(cfg.get("mv_nas_root", ""))
         self.mv_centers_expr.set(cfg.get("mv_centers_expr", ""))
         self.mv_dry_run.set(cfg.get("mv_dry_run", False))
+
 
     # ----- helpers generación -----
 
@@ -801,7 +935,9 @@ class AnexosApp(ctk.CTk):
             except Exception:
                 return None
 
-        mode = "single" if self.mode_var.get() == "single" else "all"
+        anexos_expr = None
+        if self.anexos_mode.get() == "one":
+            anexos_expr = _clean(self.anexos_value.get())
 
         center_expr = None
         if self.center_mode.get() == "one":
@@ -815,8 +951,7 @@ class AnexosApp(ctk.CTk):
             photos_dir=_clean(self.photos_dir.get()),
             cee_dir=_clean(self.cee_dir.get()),
             plans_dir=_clean(self.plans_dir.get()),
-            mode=mode,
-            anexo=_to_int(self.anexo_value.get()) if mode == "single" else None,
+            anexos_expr=anexos_expr,
             month=_to_int(self.month_var.get()),
             year=_to_int(self.year_var.get()),
             center=center_expr,
@@ -848,39 +983,7 @@ class AnexosApp(ctk.CTk):
             return
 
         # Guardar selección
-        ConfigStore.save({
-            "excel_dir": opts.excel_dir,
-            "word_dir": opts.word_dir or "",
-            "mode": opts.mode,
-            "anexo": opts.anexo or "",
-            "html_templates_dir": opts.html_templates_dir or "",
-            "photos_dir": opts.photos_dir or "",
-            "output_dir": opts.output_dir or "",
-            "cee_dir": opts.cee_dir or "",
-            "plans_dir": opts.plans_dir or "",
-            "month": int(self.month_var.get()),
-            "year": int(self.year_var.get()),
-            "centers_mode": self.center_mode.get(),
-            "centers": self.center_value.get().strip() if self.center_mode.get() == "one" else "",
-            # también persistimos los de movimiento sin tocarlos
-            "mv_local_root": self.mv_local_root.get(),
-            "mv_nas_root": self.mv_nas_root.get(),
-            "mv_centers_expr": self.mv_centers_expr.get(),
-            "mv_dry_run": bool(self.mv_dry_run.get()),
-        })
-
-        if not opts.word_dir:
-            self._log("Aviso: no se seleccionó carpeta de Word (plantillas).")
-        if not opts.html_templates_dir:
-            self._log("Aviso: no se seleccionó carpeta de plantillas HTML.")
-        if not opts.photos_dir:
-            self._log("Aviso: no se seleccionó carpeta de fotos.")
-        if not opts.cee_dir:
-            self._log("Aviso: no se seleccionó carpeta de CEE.")
-        if not opts.plans_dir:
-            self._log("Aviso: no se seleccionó carpeta de planos.")
-        if not opts.output_dir:
-            self._log("Aviso: no se seleccionó carpeta de salida; se usará la predeterminada del proceso (si aplica).")
+        ConfigStore.save(self._snapshot_config())
 
         try:
             self.btn_run.configure(state="disabled")
@@ -895,6 +998,7 @@ class AnexosApp(ctk.CTk):
             self.btn_run.configure(state="normal")
             self.btn_stop.configure(state="disabled")
             messagebox.showerror(APP_NAME, f"Error al iniciar el proceso:\n{e}", parent=self)
+
 
     # ----- movimiento -----
 
@@ -953,12 +1057,19 @@ class AnexosApp(ctk.CTk):
             self.btn_mv_run.configure(state="normal")
 
     def _on_close(self) -> None:
+        # Guardar estado actual (así los cuadros vacíos quedan vacíos al reabrir)
+        try:
+            ConfigStore.save(self._snapshot_config())
+        except Exception:
+            pass
+
         if self.runner.is_running():
             if not messagebox.askyesno(APP_NAME, "Hay un proceso en ejecución. ¿Detener y salir?", parent=self):
                 return
             self.runner.stop()
             time.sleep(0.3)
         self.destroy()
+
 
     def _poll_logs(self) -> None:
         try:
@@ -1001,6 +1112,7 @@ class AnexosApp(ctk.CTk):
 
 
 def main() -> None:
+    set_uniform_scaling()
     app = AnexosApp()
     app.mainloop()
 
