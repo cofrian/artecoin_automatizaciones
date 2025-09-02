@@ -2,7 +2,7 @@
 """
 script_carga_sonigeo.py
 
-Carga datos en la hoja 'Cont' del libro de Artecoin desde una carpeta raíz
+Carga datos en la hoja 'Consul' del libro de Artecoin desde una carpeta raíz
 con subcarpetas por centro (formato: Cxxxx_NOMBRE/Cxxxx_NOMBRE.xlsx[x/m]).
 Arquitectura limpia + SOLID, sin pandas. Diseñado para ejecutarse vía xlwings.
 
@@ -11,7 +11,6 @@ Punto de entrada recomendado desde Excel:
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 import unicodedata
@@ -97,6 +96,10 @@ CENTER_ID_COL_CANDIDATES_NORM = {
     "centro id", 
     "id_centro", 
     "centro_id",
+    "edificio id",
+    "id edificio",
+    "id_edificio",
+    "edificio_id"
     }
 
 
@@ -127,27 +130,57 @@ class ExcelGateway:
 
     # ---- Helpers de Nombres definidos / FolderPicker ----
     def get_defined_text(self, name: str) -> Optional[str]:
+        """Lee un nombre definido como texto.
+        Soporta nombres libro/hoja y devuelve None si no existe, sin lanzar COM error.
+        """
+        n = None
+        # 1) Intento directo
         try:
             n = self.book.names[name]
-        except KeyError:
+        except Exception:
+            # 2) Búsqueda tolerante: recorre todos los Names y compara por el nombre simple (sin Hoja!)
+            try:
+                for nm in self.book.names:
+                    nm_name = str(nm.name)  # puede venir como 'Hoja1!Nombre' o 'Nombre'
+                    simple = nm_name.split('!')[-1]
+                    if simple.lower() == name.lower():
+                        n = nm
+                        break
+            except Exception:
+                n = None
+
+        if n is None:
             return None
+
+        # 3) Si es fórmula ="texto", lo devolvemos como texto
+        try:
+            refers_to = n.refers_to or ""
+            s = refers_to.lstrip("=")
+            if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+                return s[1:-1]
+        except Exception:
+            pass
+
+        # 4) Si el nombre refiere a un rango, intentamos leer su valor
         try:
             val = n.refers_to_range.value
             if isinstance(val, (int, float)):
                 val = str(val)
             return (val or "").strip() or None
         except Exception:
-            # Puede ser fórmula a texto -> intentar evaluar
-            try:
-                refers_to = n.refers_to or ""
-                # = "texto"
-                m = re.match(r'^="(.*)"$', refers_to)
-                if m:
-                    return m.group(1)
-            except Exception:
-                pass
-        return None
+            return None
 
+    def get_formula_columns(self, lo, dest_headers_norm: List[str]) -> Set[int]:
+        """Devuelve los índices (1-based) de columnas que tienen fórmula en alguna fila."""
+        formula_cols: Set[int] = set()
+        row_count = self.get_table_row_count(lo)
+        if row_count > 0:
+            for idx in range(1, len(dest_headers_norm) + 1):
+                if self.read_column_has_formula(lo, idx):
+                    formula_cols.add(idx)
+        return formula_cols
+
+    
     def choose_folder(self, title: str = "Seleccionar carpeta raíz Sonigeo") -> Optional[str]:
         # 4 = msoFileDialogFolderPicker
         fd = self.app.api.FileDialog(4)
@@ -160,9 +193,9 @@ class ExcelGateway:
     # ---- Accesso a hoja y tablas ----
     def get_cont_sheet(self) -> xw.Sheet:
         try:
-            return self.book.sheets["Cont"]
+            return self.book.sheets["Consul"]
         except KeyError:
-            raise RuntimeError("No se encuentra la hoja 'Cont' en el libro de Artecoin.")
+            raise RuntimeError("No se encuentra la hoja 'Consul' en el libro de Artecoin.")
 
     def list_tables_in_sheet(self, sheet: xw.Sheet) -> Dict[str, Any]:
         """Devuelve dict nombre_listobject(case-insens) -> api ListObject"""
@@ -239,12 +272,81 @@ class ExcelGateway:
             return []
         col_rng = dbr.Columns(col_index_1based)
         vals = col_rng.Value
-        if isinstance(vals, tuple):
-            vals = list(vals)
-        # Convertir 2D -> 1D
-        if vals and isinstance(vals[0], (list, tuple)):
-            return [row[0] for row in vals]
-        return vals or []
+
+        # Normalizar a lista 1D segura en todos los casos
+        if vals is None:
+            return []
+
+        # Caso 1: un único valor (1x1 o 1 fila) => devuelve [valor]
+        if not isinstance(vals, (list, tuple)):
+            return [vals]
+
+        # Caso 2: 1D (tupla/lista de escalares) => lista
+        if vals and not isinstance(vals[0], (list, tuple)):
+            return list(vals)
+
+        # Caso 3: 2D (tuplas/listas) => tomar la primera columna
+        out: List[Any] = []
+        for row in vals:
+            if isinstance(row, (list, tuple)):
+                out.append(row[0] if row else None)
+            else:
+                out.append(row)
+        return out
+    
+    def clear_data_body_fill(self, lo) -> None:
+        """Elimina SOLO el relleno directo de las filas de datos para evitar herencias de color."""
+        try:
+            dbr = lo.DataBodyRange
+        except Exception:
+            dbr = None
+        if dbr is None:
+            return
+        try:
+            # Quita relleno directo (no toca formato numérico, bordes, etc.)
+            dbr.Interior.Pattern = -4142  # xlPatternNone
+            dbr.Interior.TintAndShade = 0
+        except Exception:
+            pass
+
+    def apply_table_style(self, lo, preferred_style: Optional[str] = None) -> None:
+        """
+        Aplica un estilo de tabla predefinido para asegurar bandas/colores consistentes.
+        - prioriza un nombre definido 'ConsulTableStyle' si existe.
+        - si no, usa el argumento preferred_style o un default.
+        """
+        style = preferred_style or self.get_defined_text("ConsulTableStyle") or "TableStyleMedium2"
+        try:
+            lo.TableStyle = style
+            # Asegurar bandas por filas, no por columnas
+            lo.ShowTableStyleRowStripes = True
+            lo.ShowTableStyleColumnStripes = False
+            print(f"INFO  - Estilo de tabla aplicado: {style}", flush=True)
+        except Exception as e:
+            print(f"WARN  - No se pudo aplicar el estilo '{style}': {e}", flush=True)
+            
+    def set_data_body_font_auto(self, lo) -> None:
+        """Pone la fuente del DataBodyRange en 'Automático' (no hereda colores raros)."""
+        try:
+            dbr = lo.DataBodyRange
+        except Exception:
+            dbr = None
+        if dbr is None:
+            return
+        try:
+            fnt = dbr.Font
+            # Automático
+            fnt.ColorIndex = -4105   # xlColorIndexAutomatic
+            # Quita cualquier sombreado de tema
+            try:
+                fnt.TintAndShade = 0
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
+
 
 
 # --------------- Lector de orígenes Sonigeo ---------------
@@ -266,7 +368,7 @@ class SonigeoReader:
         for sub in sorted(p for p in root.iterdir() if p.is_dir()):
             center_id = self.infer_center_id_from_folder(sub)
             if not center_id:
-                logger.warning(f"   ! Carpeta ignorada (no ID centro): {sub}")
+                print(f"   ! Carpeta ignorada (no ID centro): {sub}")
                 continue
             # Buscar excel con el mismo nombre que la carpeta
             expected = sub / f"{sub.name}.xlsx"
@@ -276,7 +378,7 @@ class SonigeoReader:
                 # Si no coincide nombre exacto, coger el primer .xlsx/xlsm
                 candidates = list(sub.glob("*.xls*"))
                 if not candidates:
-                    logger.warning(f"   ! No se encontró Excel para {center_id} en {sub}")
+                    print(f"   ! No se encontró Excel para {center_id} en {sub}")
                     continue
                 path = candidates[0]
             centers.append((center_id, path))
@@ -313,11 +415,11 @@ class SonigeoReader:
             try:
                 sh = book.sheets[sheet_name]
             except Exception:
-                logger.warning(f"   ! Hoja '{sheet_name}' no existe en {center_id}, se ignora.")
+                print(f"   ! Hoja '{sheet_name}' no existe en {center_id}, se ignora.")
                 continue
             matrix = self._sheet_used_values(sh)
             if not matrix or len(matrix) < 2:
-                logger.warning(f"   ! Hoja '{sheet_name}' en {center_id} sin datos, se ignora.")
+                print(f"   ! Hoja '{sheet_name}' en {center_id} sin datos, se ignora.")
                 continue
 
             header = [str(h or "").strip() for h in matrix[0]]
@@ -381,7 +483,7 @@ class ColumnMapper:
         return inter / max(1, union)
 
 
-# --------------- Escritor de tablas Cont ---------------
+# --------------- Escritor de tablas Consul ---------------
 class TableWriter:
     def __init__(self, gateway: ExcelGateway):
         self.gw = gateway
@@ -393,18 +495,27 @@ class TableWriter:
         cols = [norm(c) for c in re.split(r"[;,|]", txt) if c.strip()]
         return set(cols)
 
+    def _reapply_table_style(self, lo) -> None:
+        """Reaplica el estilo de la tabla tras escribir para evitar filas 'pintadas'."""
+        try:
+            # Si ya hay un estilo asignado, reaplicarlo refresca las bandas.
+            style = lo.TableStyle
+        except Exception:
+            style = None
+        # Limpieza ligera de relleno directo antes de reaplicar
+        self.gw.clear_data_body_fill(lo)
+        # Reaplicar (o aplicar) estilo final
+        self.gw.apply_table_style(lo, preferred_style=style)
+
+
+
     def _build_write_plan(self, lo, table_name: str) -> WritePlan:
         dest_headers = self.gw.read_table_headers(lo)
         dest_headers_norm = [norm(h) for h in dest_headers]
         protected = self._detect_protected_columns()
 
-        # Detectar columnas con fórmula (si hay filas actuales)
-        formula_cols: Set[int] = set()
-        row_count = self.gw.get_table_row_count(lo)
-        if row_count > 0:
-            for idx in range(1, len(dest_headers_norm) + 1):
-                if self.gw.read_column_has_formula(lo, idx):
-                    formula_cols.add(idx)
+        # Detectar columnas con fórmula
+        formula_cols = self.gw.get_formula_columns(lo, dest_headers_norm)
 
         # Columna de ID centro (para modo REPLACE por centro)
         id_idx: Optional[int] = None
@@ -413,6 +524,9 @@ class TableWriter:
                 id_idx = idx
                 break
 
+        if formula_cols:
+            print(f"      - Columnas con fórmula protegidas en '{table_name}': "
+                        f"{[dest_headers[i-1] for i in formula_cols]}")
         return WritePlan(
             table_name=table_name,
             dest_headers=dest_headers,
@@ -438,7 +552,7 @@ class TableWriter:
                 lo.ListRows(i).Delete()
                 deleted += 1
         if deleted:
-            logger.info(f"      - Borradas {deleted} fila(s) previas por ID_CENTRO en '{lo.Name}'.")
+            print(f"      - Borradas {deleted} fila(s) previas por ID_CENTRO en '{lo.Name}'.")
         return deleted
 
     def write_matrix(self, lo, plan: WritePlan, matrix: List[List[Any]], centers_in_batch: Set[str]) -> None:
@@ -460,12 +574,27 @@ class TableWriter:
             elif target < current:
                 self.gw.delete_table_rows_from_bottom(lo, current - target)
 
+            # --- recalcular columnas con fórmula tras redimensionar ---
+            runtime_formula_cols = self.gw.get_formula_columns(lo, plan.dest_headers_norm)
+            final_formula_cols = set(plan.formula_cols_indices) | set(runtime_formula_cols)
+
+            # --- evitar herencias de color al insertar filas ---
+            self.gw.clear_data_body_fill(lo)
+            self.gw.set_data_body_font_auto(lo)    
+
+
+            # --- recalcular columnas con fórmula tras redimensionar (columnas calculadas) ---
+            runtime_formula_cols = self.gw.get_formula_columns(lo, plan.dest_headers_norm)
+            final_formula_cols = set(plan.formula_cols_indices) | set(runtime_formula_cols)
+
+            
             # Escribir por columnas (respetando protegidas y fórmulas)
             if target > 0:
                 # Transponer por columnas
                 cols_count = len(plan.dest_headers_norm)
                 for j in range(cols_count):
-                    if (plan.dest_headers_norm[j] in plan.protected_cols_norm) or ((j + 1) in plan.formula_cols_indices):
+                    # saltar columnas protegidas o con fórmula
+                    if (plan.dest_headers_norm[j] in plan.protected_cols_norm) or ((j + 1) in final_formula_cols):
                         continue
                     col_vals = [matrix[i][j] if j < len(matrix[i]) else None for i in range(target)]
                     self.gw.write_column_values(lo, j + 1, col_vals)
@@ -473,6 +602,9 @@ class TableWriter:
         finally:
             # Restaurar totales
             self.gw.set_total_shown(lo, totals_before)
+            # Reaplicar estilo para evitar “filas pintadas” incorrectamente
+            self._reapply_table_style(lo)
+            self.gw.set_data_body_font_auto(lo) 
 
 
 # --------------- Caso de uso: orquestación end-to-end ---------------
@@ -483,17 +615,10 @@ class LoadSonigeoIntoContUseCase:
         self.writer = writer
 
     def _load_mapping(self) -> Dict[str, str]:
-        txt = self.gw.get_defined_text("SonigeoMap_JSON_Cont")
-        if not txt:
-            logger.info("• Usando mapeo hoja→tabla por defecto.")
-            return DEFAULT_SONIGEO_MAP.copy()
-        try:
-            mp = json.loads(txt)
-            logger.info("• Usando mapeo hoja→tabla desde 'SonigeoMap_JSON_Cont'.")
-            return {k: v for k, v in mp.items()}
-        except Exception as e:
-            logger.warning(f"   ! Error leyendo SonigeoMap_JSON_Cont: {e}. Se usa mapeo por defecto.")
-            return DEFAULT_SONIGEO_MAP.copy()
+        """Mapeo fijo hoja Sonigeo -> tabla destino en 'Consul/Cont'."""
+        # Usamos exclusivamente el mapeo por defecto definido en el módulo.
+        print("• Usando mapeo hoja→tabla por defecto (DEFAULT_SONIGEO_MAP).")
+        return DEFAULT_SONIGEO_MAP.copy()
 
     def _autodetect_table_for_sheet(
         self,
@@ -512,16 +637,16 @@ class LoadSonigeoIntoContUseCase:
                 best_score = score
                 best_name = tname_norm
         if best_name and best_score >= 0.45:  # umbral razonable
-            logger.info(f"   · Autodetectada tabla '{best_name}' (score={best_score:.2f}).")
+            print(f"   · Autodetectada tabla '{best_name}' (score={best_score:.2f}).")
             return best_name
-        logger.warning("   ! No se pudo autodetectar tabla destino de forma fiable (score bajo).")
+        print("   ! No se pudo autodetectar tabla destino de forma fiable (score bajo).")
         return None
 
     def run(self) -> None:
         # 1) Determinar ruta Sonigeo
         root_txt = self.gw.get_defined_text("Ruta_SonigeoRoot")
         if not root_txt:
-            logger.info("• No hay valor en 'Ruta_SonigeoRoot'. Abriendo selector de carpeta...")
+            print("• No hay valor en 'Ruta_SonigeoRoot'. Abriendo selector de carpeta...")
             root_txt = self.gw.choose_folder("Selecciona la carpeta raíz de Sonigeo")
         if not root_txt:
             raise RuntimeError("No se ha proporcionado la carpeta raíz de Sonigeo.")
@@ -529,13 +654,13 @@ class LoadSonigeoIntoContUseCase:
         if not root.exists():
             raise RuntimeError(f"La carpeta especificada no existe: {root}")
 
-        logger.info(f"• Carpeta raíz Sonigeo: {root}")
+        print(f"• Carpeta raíz Sonigeo: {root}")
 
         # 2) Descubrir centros
         centers = self.reader.discover_centers(root)
         if not centers:
             raise RuntimeError("No se encontraron centros válidos en la carpeta de Sonigeo.")
-        logger.info(f"• Centros detectados: {len(centers)}")
+        print(f"• Centros detectados: {len(centers)}")
 
         # 3) Leer todos los exceles y acumular por hoja
         aggregated: Dict[str, SourceBlock] = {}
@@ -552,7 +677,7 @@ class LoadSonigeoIntoContUseCase:
 
         try:
             for center_id, xlsx_path in centers:
-                logger.info(f"· Leyendo centro {center_id}: {xlsx_path.name}")
+                print(f"· Leyendo centro {center_id}: {xlsx_path.name}")
                 centers_in_batch.add(center_id)
                 book_src = None
                 try:
@@ -567,7 +692,7 @@ class LoadSonigeoIntoContUseCase:
                             )
                         aggregated[sheet_name].rows.extend(sb.rows)
                 except Exception as e:
-                    logger.error(f"   ! Error leyendo {xlsx_path}: {e}")
+                    print(f"   ! Error leyendo {xlsx_path}: {e}")
                 finally:
                     if book_src:
                         try:
@@ -575,12 +700,12 @@ class LoadSonigeoIntoContUseCase:
                         except Exception:
                             pass
             if not aggregated:
-                logger.warning("No se recopiló ningún dato desde Sonigeo.")
+                print("No se recopiló ningún dato desde Sonigeo.")
                 return
 
-            # 4) Preparar escritura en 'Cont'
-            cont = self.gw.get_cont_sheet()
-            tables = self.gw.list_tables_in_sheet(cont)
+            # 4) Preparar escritura en 'Consul'
+            consul = self.gw.get_cont_sheet()
+            tables = self.gw.list_tables_in_sheet(consul)
             sheet_map = self._load_mapping()  # hoja -> nombre tabla (idealmente)
 
             writer = self.writer
@@ -595,16 +720,16 @@ class LoadSonigeoIntoContUseCase:
                     lo_key = norm(desired_table_name)
                     lo = tables.get(lo_key)
                     if not lo:
-                        logger.warning(f"   ! Tabla '{desired_table_name}' no existe en 'Cont'. Intentando autodetección...")
+                        print(f"   ! Tabla '{desired_table_name}' no existe en 'Consul'. Intentando autodetección...")
                 if lo is None:
                     # Autodetectar por intersección de cabeceras
-                    auto_key = self._autodetect_table_for_sheet(cont, tables, sblock)
+                    auto_key = self._autodetect_table_for_sheet(consul, tables, sblock)
                     if auto_key:
                         lo = tables[auto_key]
                         lo_key = auto_key
 
                 if lo is None:
-                    logger.warning(f"   ! No se encontró tabla destino para hoja '{sheet_name}'. Se omite.")
+                    print(f"   ! No se encontró tabla destino para hoja '{sheet_name}'. Se omite.")
                     continue
 
                 # Plan de escritura
@@ -619,7 +744,7 @@ class LoadSonigeoIntoContUseCase:
                     source_block=sblock
                 )
 
-                logger.info(f"· Escribiendo {len(matrix)} fila(s) en tabla '{plan.table_name}' (hoja '{sheet_name}')...")
+                print(f"· Escribiendo {len(matrix)} fila(s) en tabla '{plan.table_name}' (hoja '{sheet_name}')...")
                 writer.write_matrix(lo, plan, matrix, centers_in_batch)
 
         finally:
@@ -637,7 +762,7 @@ class LoadSonigeoIntoContUseCase:
             except Exception:
                 pass
 
-        logger.info("• Carga Sonigeo finalizada.")
+        print("• Carga Sonigeo finalizada.")
 
 
 # --------------- Punto de entrada ---------------
@@ -653,7 +778,7 @@ def main():
                 raise RuntimeError("No hay libro abierto para operar.")
             book = app.books.active
         except Exception as e:
-            logger.error(f"No se puede obtener el libro activo: {e}")
+            print(f"No se puede obtener el libro activo: {e}")
             raise
 
     gw = ExcelGateway(book)
@@ -664,5 +789,5 @@ def main():
     try:
         use_case.run()
     except Exception as e:
-        logger.error(f"Error inesperado: {e}")
+        print(f"Error inesperado: {e}")
         raise
