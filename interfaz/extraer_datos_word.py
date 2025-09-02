@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
+r"""
 extraer_datos_word.py
 
 Qué hace:
@@ -79,11 +79,6 @@ def _init_gui():
     """Inicializa la interfaz gráfica de tkinter."""
     if not GUI_AVAILABLE:
         return None
-    root = tk.Tk()
-    root.withdraw()  # Ocultar ventana principal
-    return root
-def _init_gui():
-    """Inicializa la interfaz gráfica de tkinter."""
     root = tk.Tk()
     root.withdraw()  # Ocultar ventana principal
     return root
@@ -867,7 +862,7 @@ def _build_optimized_photo_index(root: Path) -> tuple[dict, dict, dict]:
     if cache_key in _file_index_cache:
         return _file_index_cache[cache_key]
     
-    print(f"🔍 Indexando fotos en: {root.name}...")
+    print(f"[INFO] Indexando fotos en: {root.name}...")
     start_time = time.time()
     
     exact_index = {}  # {nombre_exacto: Path}
@@ -905,7 +900,7 @@ def _build_optimized_photo_index(root: Path) -> tuple[dict, dict, dict]:
     _file_index_cache[cache_key] = result
     
     elapsed = time.time() - start_time
-    print(f"✅ Índice creado: {foto_count} fotos en {elapsed:.2f}s")
+    print(f"[OK] Indice creado: {foto_count} fotos en {elapsed:.2f}s")
     
     return result
 # --------------------------
@@ -1094,18 +1089,25 @@ def _fallback_candidates_optimized(ident: str, exact_index: dict, normalized_ind
         fotos_centro = []
         seen_realpaths = set()
         
+        # Extraer el código de centro del ID
+        centro_match = re.match(r'(C\d+)', ident.upper())
+        centro_codigo = centro_match.group(1) if centro_match else ident.upper()
+        
         # Buscar todas las fotos que empiecen con C (como C001_FC0001.jpg)
         for norm_key, paths in normalized_index.items():
             for p in paths:
                 stem = path_to_info[p]["stem"]
                 # Si el nombre del archivo empieza con C seguido de números
                 if re.match(r'^C\d+', stem, re.IGNORECASE):
-                    realpath = path_to_info[p]["realpath"]
-                    if realpath not in seen_realpaths:
-                        seen_realpaths.add(realpath)
-                        fotos_centro.append(p)
-                        if len(fotos_centro) >= max_photos:
-                            break
+                    # NUEVA VERIFICACIÓN: la foto debe estar en la carpeta del centro correcto
+                    foto_path_str = str(p).upper()
+                    if centro_codigo in foto_path_str:
+                        realpath = path_to_info[p]["realpath"]
+                        if realpath not in seen_realpaths:
+                            seen_realpaths.add(realpath)
+                            fotos_centro.append(p)
+                            if len(fotos_centro) >= max_photos:
+                                break
             if len(fotos_centro) >= max_photos:
                 break
         
@@ -1116,6 +1118,10 @@ def _fallback_candidates_optimized(ident: str, exact_index: dict, normalized_ind
     if tipo == "ACOM":
         fotos_acom = []
         seen_realpaths = set()
+        
+        # Extraer el código de centro del ID
+        centro_match = re.match(r'(C\d+)', ident.upper())
+        centro_codigo = centro_match.group(1) if centro_match else ""
         
         # Patrones MÁS ESPECÍFICOS para acometidas - solo estas fotos
         acom_patterns = [
@@ -1152,12 +1158,24 @@ def _fallback_candidates_optimized(ident: str, exact_index: dict, normalized_ind
                     
                     # Si NO coincide con patrones excluidos, es válida
                     if not any(re.search(excl_pattern, stem_lower, re.IGNORECASE) for excl_pattern in patrones_excluidos):
-                        realpath = path_to_info[p]["realpath"]
-                        if realpath not in seen_realpaths:
-                            seen_realpaths.add(realpath)
-                            fotos_acom.append(p)
-                            if len(fotos_acom) >= max_photos:
-                                break
+                        # NUEVA VERIFICACIÓN: la foto debe estar en la carpeta del centro correcto
+                        if centro_codigo:
+                            foto_path_str = str(p).upper()
+                            if centro_codigo in foto_path_str:
+                                realpath = path_to_info[p]["realpath"]
+                                if realpath not in seen_realpaths:
+                                    seen_realpaths.add(realpath)
+                                    fotos_acom.append(p)
+                                    if len(fotos_acom) >= max_photos:
+                                        break
+                        else:
+                            # Si no se puede extraer el centro, aplicar lógica original
+                            realpath = path_to_info[p]["realpath"]
+                            if realpath not in seen_realpaths:
+                                seen_realpaths.add(realpath)
+                                fotos_acom.append(p)
+                                if len(fotos_acom) >= max_photos:
+                                    break
             if len(fotos_acom) >= max_photos:
                 break
         
@@ -1192,7 +1210,14 @@ def _fallback_candidates_optimized(ident: str, exact_index: dict, normalized_ind
                     # Verificar que la parte del nombre de foto está contenida en el ID de la entidad
                     # Ejemplo: foto "E001_FE0001" -> parte "E001" debe estar en ID "C0007E001"
                     if foto_id_part in ident_upper:
-                        es_valida = True
+                        # NUEVA VERIFICACIÓN: la foto debe estar en la carpeta del centro correcto
+                        centro_match = re.match(r'(C\d+)', ident_upper)
+                        if centro_match:
+                            centro_codigo = centro_match.group(1)
+                            # Verificar que la ruta de la foto contiene el centro correcto
+                            foto_path_str = str(p).upper()
+                            if centro_codigo in foto_path_str:
+                                es_valida = True
             
             elif tipo == "DEPENDENCIA":
                 # DEPENDENCIAS: solo fotos cuyo nombre esté contenido en el ID de la entidad
@@ -1206,7 +1231,14 @@ def _fallback_candidates_optimized(ident: str, exact_index: dict, normalized_ind
                     if foto_id_part in ident_upper:
                         # Verificar que NO tiene Q (no es un equipo)
                         if 'Q' not in stem_upper:
-                            es_valida = True
+                            # NUEVA VERIFICACIÓN: la foto debe estar en la carpeta del centro correcto
+                            centro_match = re.match(r'(C\d+)', ident_upper)
+                            if centro_match:
+                                centro_codigo = centro_match.group(1)
+                                # Verificar que la ruta de la foto contiene el centro correcto
+                                foto_path_str = str(p).upper()
+                                if centro_codigo in foto_path_str:
+                                    es_valida = True
             
             elif tipo in ["CLIMA", "EQHORIZ", "ELEVA", "OTROSEQ", "ILUM", "ENVOL", "SISTCC"]:
                 # EQUIPOS: solo fotos cuyo nombre esté contenido en el ID de la entidad
@@ -1218,12 +1250,30 @@ def _fallback_candidates_optimized(ident: str, exact_index: dict, normalized_ind
                     # Verificar que la parte del nombre de foto está contenida en el ID de la entidad
                     # Ejemplo: foto "QE001_FQE0001" -> parte "QE001" debe estar en ID "C0007E001D0001QE001"
                     if foto_id_part in ident_upper:
-                        es_valida = True
+                        # NUEVA VERIFICACIÓN: la foto debe estar en la carpeta del centro correcto
+                        # Extraer el código de centro del ID (ej: C0007E001D0007QI007 -> C0007)
+                        centro_match = re.match(r'(C\d+)', ident_upper)
+                        if centro_match:
+                            centro_codigo = centro_match.group(1)
+                            # Verificar que la ruta de la foto contiene el centro correcto
+                            foto_path_str = str(p).upper()
+                            if centro_codigo in foto_path_str:
+                                es_valida = True
             
             else:
                 # OTROS: lógica por defecto
                 if ident_upper in stem_upper:
-                    es_valida = True
+                    # NUEVA VERIFICACIÓN: la foto debe estar en la carpeta del centro correcto
+                    centro_match = re.match(r'(C\d+)', ident_upper)
+                    if centro_match:
+                        centro_codigo = centro_match.group(1)
+                        # Verificar que la ruta de la foto contiene el centro correcto
+                        foto_path_str = str(p).upper()
+                        if centro_codigo in foto_path_str:
+                            es_valida = True
+                    else:
+                        # Si no se puede extraer el centro, aplicar lógica original
+                        es_valida = True
             
             # Si la foto es válida, agregarla
             if es_valida:
@@ -1568,9 +1618,12 @@ def _tester_log_missing(tester: Optional[dict], tipo: str, ident: str, slug: str
     if tester is None: return
     tester["declared_missing"].append({"tipo": tipo, "id": ident, "slug": Path(slug).stem})
 
-def _tester_log_fallback(tester: Optional[dict], tipo: str, ident: str, count: int):
+def _tester_log_fallback(tester: Optional[dict], tipo: str, ident: str, count: int, extra_note: str = ""):
     if tester is None or count <= 0: return
-    tester["fallback_used"].append({"tipo": tipo, "id": ident, "count": int(count)})
+    entry = {"tipo": tipo, "id": ident, "count": int(count)}
+    if extra_note:
+        entry["note"] = extra_note
+    tester["fallback_used"].append(entry)
 
 def _tester_log_sequential(tester: Optional[dict], tipo: str, ident: str, count: int):
     if tester is None or count <= 0: return
@@ -1670,10 +1723,15 @@ def build_context(dfs: Dict[str, pd.DataFrame]) -> List[Dict]:
         df = dfs[df_key]
         if df is None or df.empty:
             return pd.DataFrame()
-        m = (df.get("ID CENTRO", pd.Series(dtype=str)) == center_id)
+        
+        # Crear máscara booleana correctamente alineada con el DataFrame
+        m = (df["ID CENTRO"] == center_id) if "ID CENTRO" in df.columns else pd.Series([False] * len(df), index=df.index)
+        
         if extra:
             for c, v in extra.items():
-                m &= (df.get(c, pd.Series(dtype=str)) == v)
+                if c in df.columns:
+                    m = m & (df[c] == v)
+                    
         return df[m].copy()
 
     for _, row_c in d_cent.iterrows():
@@ -1790,7 +1848,7 @@ def add_photos_to_context(ctx_all: List[Dict], df_consul: Optional[pd.DataFrame]
         declared = _declared_from_consul(consul_map, tipo, ident, cid)
         fotos_list = []
 
-       
+        # PASO 1: Buscar fotos declaradas en Excel
         if declared:
             for s in declared:
                 try:
@@ -1817,67 +1875,152 @@ def add_photos_to_context(ctx_all: List[Dict], df_consul: Optional[pd.DataFrame]
                         faltantes.setdefault(f"{tipo}:{ident}", []).append(s)
                 except Exception as e:
                     _tester_log_error(tester, f"{tipo}:{ident}:{s}", e)
-        else:
-            # Fallback optimizado por carpeta
-            try:
-                cands = _fallback_candidates_optimized(ident, exact_index, normalized_index, path_to_info, max_photos=6, tipo=tipo)
-                for p in cands:
+
+        # PASO 2: SIEMPRE buscar fotos adicionales en la carpeta Referencias (incluso si ya hay fotos del Excel)
+        try:
+            # Obtener fotos adicionales usando el método fallback
+            cands_adicionales = _fallback_candidates_optimized(ident, exact_index, normalized_index, path_to_info, max_photos=12, tipo=tipo)
+            
+            # Crear set de rutas ya incluidas para evitar duplicados
+            rutas_existentes = {foto["path"] for foto in fotos_list}
+            
+            # Añadir fotos adicionales que no estén ya incluidas
+            fotos_adicionales_count = 0
+            for p in cands_adicionales:
+                if str(p) not in rutas_existentes:
                     stem = path_to_info[p]["stem"]
                     fotos_list.append({"path": str(p), "name": stem, "id": stem})
                     _tester_mark_used(tester, str(p))
-                _tester_log_fallback(tester, tipo, ident, len(cands))
-            except Exception as e:
-                _tester_log_error(tester, f"{tipo}:{ident}:fallback", e)
-
-        # NUEVA RESTRICCIÓN UNIVERSAL: Para TODAS las entidades, filtrar fotos por nombre contenido en ID
-        if not declared:  # Solo aplicar si no hay fotos declaradas en Excel
-            fotos_list_filtradas = []
-            for foto in fotos_list:
-                foto_name = foto["name"]
-                # Extraer la parte relevante del nombre de la foto (sin extensión y prefijos comunes)
-                foto_clean = foto_name.upper()
-                
-                # Remover prefijos comunes de fotos
-                prefixes_to_remove = ["FOTO_", "IMG_", "IMAGE_"]
-                for prefix in prefixes_to_remove:
-                    if foto_clean.startswith(prefix):
-                        foto_clean = foto_clean[len(prefix):]
-                        break
-                
-                # El nombre de la foto debe estar contenido en el ID de la entidad
-                # Ejemplo: foto "D0001_FD0001" -> parte "D0001" debe estar en ID "C0007E001D0001"
-                # Ejemplo: foto "E001_FE0001" -> parte "E001" debe estar en ID "C0007E001"
-                # Ejemplo: foto "QE001_FQE0001" -> parte "QE001" debe estar en ID "C0007E001D0001QE001"
-                
-                # Extraer la primera parte del nombre de foto (antes del primer _)
-                foto_parts = foto_clean.split('_')
-                foto_id_part = foto_parts[0] if foto_parts else foto_clean
-                
-                # Verificar si el ID de la foto está contenido en el ID de la entidad
-                incluir_foto = False
-                if foto_id_part in ident.upper():
-                    incluir_foto = True
-                
-                # EXCEPCIÓN ESPECIAL: Fotos del estilo C001, C0001, C007, etc. (código de centro)
-                # Estas siempre van al centro porque solo hay uno y evitamos problemas
-                import re
-                if tipo == "CENTRO" and re.match(r'^C0*\d+$', foto_id_part):
-                    incluir_foto = True
-                
-                if incluir_foto:
-                    fotos_list_filtradas.append(foto)
-                else:
-                    # Log para debug - foto filtrada por restricción universal
-                    if tester:
-                        tester.setdefault("fotos_filtradas_universal", []).append({
-                            "entidad_tipo": tipo,
-                            "entidad_id": ident,
-                            "foto_name": foto_name,
-                            "foto_id_part": foto_id_part,
-                            "razon": f"ID parte '{foto_id_part}' no encontrado en entidad '{ident}'"
-                        })
+                    fotos_adicionales_count += 1
             
-            fotos_list = fotos_list_filtradas
+            if fotos_adicionales_count > 0:
+                _tester_log_fallback(tester, tipo, ident, fotos_adicionales_count, extra_note=f"({fotos_adicionales_count} adicionales)")
+        except Exception as e:
+            _tester_log_error(tester, f"{tipo}:{ident}:adicionales", e)
+
+        # PASO 3: Aplicar filtrado inteligente SOLO a fotos adicionales (no del Excel)
+        fotos_excel_paths = set()
+        if declared:
+            # Marcar fotos que vienen del Excel para no filtrarlas
+            for s in declared:
+                p = _resolve_name_to_path_optimized(s, exact_index, normalized_index, fuzzy_threshold)
+                if p:
+                    fotos_excel_paths.add(str(p))
+        
+        fotos_list_filtradas = []
+        for foto in fotos_list:
+            foto_path = foto["path"]
+            foto_name = foto["name"]
+            
+            # Si la foto viene del Excel, SIEMPRE incluirla (no filtrar)
+            if foto_path in fotos_excel_paths:
+                fotos_list_filtradas.append(foto)
+                continue
+            
+            # Para fotos adicionales encontradas por fallback, aplicar filtrado inteligente
+            foto_clean = foto_name.upper()
+            
+            # Remover prefijos comunes de fotos
+            prefixes_to_remove = ["FOTO_", "IMG_", "IMAGE_"]
+            for prefix in prefixes_to_remove:
+                if foto_clean.startswith(prefix):
+                    foto_clean = foto_clean[len(prefix):]
+                    break
+            
+            # MAPEO INTELIGENTE POR TIPOS DE ENTIDAD
+            PATRON_MAPEO_TIPOS = {
+                "ACOM": ["CDRO", "CUADRO", "ELECT", "ACOM"],  # Acompañantes/Cuadros eléctricos
+                "EQHORIZ": ["QH", "BOMB", "B00", "BOMBA", "EQUIPO"],  # Equipos horizontales/Bombas
+                "SISTCC": ["QG", "CALEF", "BOMB", "SIST", "SISTEMA", "B00"],  # Sistemas calefacción
+                "CLIMA": ["QE", "QI", "CLIMA", "CLIM", "AC", "HVAC"],  # Equipos climatización
+                "ILUM": ["I00", "ILUM", "LUZ", "LAMP", "LED"],  # Iluminación
+                "ENVOL": ["CR", "ENVOL", "CERR", "FACH", "VENT"],  # Envolventes/Cerramientos
+                "ELEVA": ["QV", "ELEV", "ASCEN", "MONTAC"],  # Elevadores
+                "OTROSEQ": ["OTROS", "EQUIP", "MAQUIN"],  # Otros equipos
+                "DEPENDENCIA": ["D00", "DEP", "SALA", "AULA"],  # Dependencias
+                "EDIFICIO": ["E00", "EDIF", "BLOQ", "NAVE"],  # Edificios
+                "CENTRO": ["C00", "CENT", "FC"]  # Centros
+            }
+            
+            # Extraer la primera parte del nombre de foto (antes del primer _)
+            foto_parts = foto_clean.split('_')
+            foto_id_part = foto_parts[0] if foto_parts else foto_clean
+            
+            # MÉTODO 1: Matching exacto tradicional
+            incluir_foto = False
+            if foto_id_part in ident.upper():
+                incluir_foto = True
+            
+            # MÉTODO 2: Matching por patrones de tipo de entidad
+            if not incluir_foto and tipo in PATRON_MAPEO_TIPOS:
+                patrones_tipo = PATRON_MAPEO_TIPOS[tipo]
+                for patron in patrones_tipo:
+                    if foto_clean.startswith(patron) or patron in foto_clean:
+                        incluir_foto = True
+                        break
+            
+            # MÉTODO 3: Matching específico para equipos con numeración
+            if not incluir_foto:
+                # Para equipos con códigos numéricos (QH0001, QE001, etc.)
+                if re.match(r'^[A-Z]{1,2}\d+', foto_id_part):
+                    # Extraer prefijo de letras (QH, QE, etc.)
+                    letra_match = re.match(r'^([A-Z]{1,2})', foto_id_part)
+                    if letra_match:
+                        prefijo_foto = letra_match.group(1)
+                        if prefijo_foto in ident.upper():
+                            incluir_foto = True
+                
+                # Para bombas/equipos con código B (B001, B002, etc.)
+                if foto_id_part.startswith('B00') or foto_id_part.startswith('BOMB'):
+                    if tipo in ["EQHORIZ", "SISTCC", "ACOM"]:
+                        incluir_foto = True
+            
+            # MÉTODO 4: EXCEPCIÓN ESPECIAL para fotos de centro
+            if tipo == "CENTRO" and re.match(r'^C0*\d+$', foto_id_part):
+                incluir_foto = True
+            
+            # MÉTODO 5: Matching por número de dependencia/edificio
+            if not incluir_foto and tipo in ["DEPENDENCIA", "EDIFICIO"]:
+                # Extraer números del ID de entidad
+                numeros_entidad = re.findall(r'\d+', ident)
+                numeros_foto = re.findall(r'\d+', foto_id_part)
+                
+                # Si algún número coincide, incluir
+                if any(num in numeros_entidad for num in numeros_foto):
+                    incluir_foto = True
+            
+            # MÉTODO 6: Matching por proximidad para equipos relacionados
+            if not incluir_foto and tipo in ["EQHORIZ", "SISTCC", "CLIMA"]:
+                # Para fotos de equipos generales que podrían aplicar a cualquier equipo del tipo
+                equipos_generales = ["BOMBA", "BOMB", "EQUIP", "MAQUIN", "MOTOR", "PANEL"]
+                if any(general in foto_clean for general in equipos_generales):
+                    incluir_foto = True
+            
+            # MÉTODO 7: Matching especial para cuadros eléctricos en ACOM
+            if not incluir_foto and tipo == "ACOM":
+                cuadros_electricos = ["CDRO", "CUADRO", "ELECT", "PANEL", "ARMARIO"]
+                if any(cuadro in foto_clean for cuadro in cuadros_electricos):
+                    incluir_foto = True
+            
+            if incluir_foto:
+                fotos_list_filtradas.append(foto)
+            else:
+                # Log para debug - foto filtrada por restricción universal
+                if tester:
+                    razon_filtrado = f"ID parte '{foto_id_part}' no encontrado en entidad '{ident}' (foto adicional)"
+                    if tipo in PATRON_MAPEO_TIPOS:
+                        patrones_esperados = ", ".join(PATRON_MAPEO_TIPOS[tipo])
+                        razon_filtrado += f" | Patrones esperados para {tipo}: [{patrones_esperados}]"
+                    
+                    tester.setdefault("fotos_filtradas_universal", []).append({
+                        "entidad_tipo": tipo,
+                        "entidad_id": ident,
+                        "foto_name": foto_name,
+                        "foto_id_part": foto_id_part,
+                        "razon": razon_filtrado
+                    })
+        
+        fotos_list = fotos_list_filtradas
         
         # Deduplicación optimizada usando realpath del índice
         seen_realpaths = set()
@@ -1912,6 +2055,17 @@ def add_photos_to_context(ctx_all: List[Dict], df_consul: Optional[pd.DataFrame]
             "fotos": fotos_list_unique,  # Mantener formato actual también
             "fotos_count": len(fotos_list_unique),
         })
+        
+        # Log informativo para debugging
+        fotos_excel_count = len([p for p in fotos_paths if p in fotos_excel_paths]) if declared else 0
+        fotos_adicionales_count = len(fotos_list_unique) - fotos_excel_count
+        if len(fotos_list_unique) > 0:
+            debug_msg = f"[FOTOS] {tipo}:{ident} -> Total: {len(fotos_list_unique)}"
+            if fotos_excel_count > 0:
+                debug_msg += f", Excel: {fotos_excel_count}"
+            if fotos_adicionales_count > 0:
+                debug_msg += f", Adicionales: {fotos_adicionales_count}"
+            print(debug_msg)
 
     for c in ctx_all:
         cid = c["centro"]["id"]
@@ -1922,7 +2076,7 @@ def add_photos_to_context(ctx_all: List[Dict], df_consul: Optional[pd.DataFrame]
             continue
             
         cid = cid.strip()
-        print(f"🏢 Procesando centro: {cid}")
+        print(f"[CENTRO] Procesando centro: {cid}")
 
         # localizar carpeta del centro con búsqueda inteligente
         center_dir = None
@@ -1940,7 +2094,7 @@ def add_photos_to_context(ctx_all: List[Dict], df_consul: Optional[pd.DataFrame]
                 else:
                     # Método 3: Usar carpeta raíz como fallback
                     center_dir = fotos_root
-                    print(f"⚠️  No se encontró carpeta específica para {cid}, usando carpeta raíz")
+                    print(f"[WARN] No se encontro carpeta especifica para {cid}, usando carpeta raiz")
 
         ref_dir = None
         for sub in ["Referencias/Fotografías referenciadas", "Referencias",
@@ -1955,18 +2109,73 @@ def add_photos_to_context(ctx_all: List[Dict], df_consul: Optional[pd.DataFrame]
         fotos_index = _list_files_index(ref_dir)  # Mantener para compatibilidad con tester
         tester = _tester_init(cid, fotos_index) if tester_on else None
 
-        inject(c["centro"], "CENTRO", cid, photo_indices, tester)
+        # NUEVO: Inicializar tracking de cobertura por centro
+        centro_stats = {
+            "centro_id": cid,
+            "carpeta_referencias": str(ref_dir),
+            "total_fotos_carpeta": len(fotos_index),
+            "fotos_usadas": set(),
+            "fotos_por_entidad": {}
+        }
+
+        # Función wrapper para inject que trackea estadísticas
+        def inject_with_stats(entity: dict, tipo: str, cid: str, photo_indices: tuple, tester: Optional[dict]):
+            fotos_antes = len(centro_stats["fotos_usadas"])
+            inject(entity, tipo, cid, photo_indices, tester)
+            
+            # Obtener fotos de esta entidad
+            entity_id = str(entity.get(PHOTO_ID_FIELD[tipo], "")).strip()
+            fotos_entidad = entity.get("fotos_paths", [])
+            
+            # Trackear fotos usadas
+            for foto_path in fotos_entidad:
+                # Convertir a stem (nombre sin extensión) para comparar con el índice
+                foto_stem = Path(foto_path).stem
+                if foto_stem in fotos_index:
+                    centro_stats["fotos_usadas"].add(foto_stem)
+            
+            # Estadísticas por entidad
+            fotos_despues = len(centro_stats["fotos_usadas"])
+            centro_stats["fotos_por_entidad"][f"{tipo}:{entity_id}"] = {
+                "fotos_count": len(fotos_entidad),
+                "fotos_nuevas_usadas": fotos_despues - fotos_antes
+            }
+
+        inject_with_stats(c["centro"], "CENTRO", cid, photo_indices, tester)
         for e in c["edif"]:
-            inject(e, "EDIFICIO", cid, photo_indices, tester)
-            for d in e.get("dependencias", []): inject(d, "DEPENDENCIA", cid, photo_indices, tester)
-            for it in e.get("acom", []):        inject(it, "ACOM",        cid, photo_indices, tester)
-            for it in e.get("envolventes", []): inject(it, "ENVOL",       cid, photo_indices, tester)
-            for it in e.get("sistemas_cc", []): inject(it, "SISTCC",      cid, photo_indices, tester)
-            for it in e.get("equipos_clima", []):inject(it,"CLIMA",       cid, photo_indices, tester)
-            for it in e.get("equipos_horiz", []):inject(it,"EQHORIZ",     cid, photo_indices, tester)
-            for it in e.get("elevadores", []):  inject(it, "ELEVA",       cid, photo_indices, tester)
-            for it in e.get("otros_equipos", []):inject(it,"OTROSEQ",     cid, photo_indices, tester)
-            for it in e.get("iluminacion", []): inject(it, "ILUM",        cid, photo_indices, tester)
+            inject_with_stats(e, "EDIFICIO", cid, photo_indices, tester)
+            for d in e.get("dependencias", []): inject_with_stats(d, "DEPENDENCIA", cid, photo_indices, tester)
+            for it in e.get("acom", []):        inject_with_stats(it, "ACOM",        cid, photo_indices, tester)
+            for it in e.get("envolventes", []): inject_with_stats(it, "ENVOL",       cid, photo_indices, tester)
+            for it in e.get("sistemas_cc", []): inject_with_stats(it, "SISTCC",      cid, photo_indices, tester)
+            for it in e.get("equipos_clima", []):inject_with_stats(it,"CLIMA",       cid, photo_indices, tester)
+            for it in e.get("equipos_horiz", []):inject_with_stats(it,"EQHORIZ",     cid, photo_indices, tester)
+            for it in e.get("elevadores", []):  inject_with_stats(it, "ELEVA",       cid, photo_indices, tester)
+            for it in e.get("otros_equipos", []):inject_with_stats(it,"OTROSEQ",     cid, photo_indices, tester)
+            for it in e.get("iluminacion", []): inject_with_stats(it, "ILUM",        cid, photo_indices, tester)
+
+        # REPORTE DE COBERTURA POR CENTRO
+        fotos_usadas = len(centro_stats["fotos_usadas"])
+        total_fotos = centro_stats["total_fotos_carpeta"]
+        porcentaje = (fotos_usadas / total_fotos * 100) if total_fotos > 0 else 0
+        
+        print(f"\n{'='*80}")
+        print(f"📊 ESTADÍSTICAS DE COBERTURA - CENTRO {cid}")
+        print(f"{'='*80}")
+        print(f"📁 Carpeta Referencias: {Path(centro_stats['carpeta_referencias']).name}")
+        print(f"📷 Total fotos en carpeta: {total_fotos}")
+        print(f"✅ Fotos incluidas en JSON: {fotos_usadas}")
+        print(f"📈 PORCENTAJE DE COBERTURA: {porcentaje:.1f}%")
+        print(f"🚫 Fotos no usadas: {total_fotos - fotos_usadas}")
+        print(f"{'='*80}")
+        
+        # Detalle por tipo de entidad
+        entidades_con_fotos = [(k, v) for k, v in centro_stats["fotos_por_entidad"].items() if v["fotos_count"] > 0]
+        if entidades_con_fotos:
+            print("📋 DETALLE POR ENTIDAD:")
+            for entidad_id, stats in entidades_con_fotos:
+                print(f"   {entidad_id}: {stats['fotos_count']} fotos")
+        print(f"{'='*80}\n")
 
         if tester_on:
             _tester_write_txt(tester, outdir)
@@ -2203,7 +2412,7 @@ def main():
                     help="Fuerza modo no interactivo (requiere --xlsx y --fotos-root)")
     args = ap.parse_args()
 
-    print("\n🏢 EXTRACTOR DE DATOS DE AUDITORÍAS ENERGÉTICAS")
+    print("\n[EXTRACTOR] EXTRACTOR DE DATOS DE AUDITORIAS ENERGETICAS")
     print("=" * 60)
     
     # Determinar si usar modo interactivo
@@ -2216,7 +2425,7 @@ def main():
         modo_interactivo = False
     
     if modo_interactivo:
-        print("🔄 Modo interactivo activado")
+        print("[INFO] Modo interactivo activado")
         
         # Solicitar información al usuario
         excel_path = _solicitar_excel()
@@ -2241,7 +2450,7 @@ def main():
         incluir_uris = True  # Por defecto en modo interactivo
         
     else:
-        print("🔧 Modo línea de comandos activado")
+        print("[INFO] Modo linea de comandos activado")
         
         # Validar parámetros requeridos
         if not args.xlsx:
@@ -2273,16 +2482,16 @@ def main():
 
     outdir.mkdir(parents=True, exist_ok=True)
     
-    print(f"\n🚀 Iniciando procesamiento...")
-    print(f"📊 Excel: {xlsx.name}")
-    print(f"📁 Fotos: {fotos_root.name}")
+    print(f"\n[INFO] Iniciando procesamiento...")
+    print(f"[Excel] {xlsx.name}")
+    print(f"[Fotos] {fotos_root.name}")
 
     # 1) Leer hojas
-    print("\n📖 Leyendo hojas del Excel...")
+    print("\n[INFO] Leyendo hojas del Excel...")
     dfs = _read_all_sheets(xlsx)
 
     # 2) Contexto base
-    print("🏗️  Construyendo contexto de datos...")
+    print("[INFO] Construyendo contexto de datos...")
     ctx = build_context(dfs)
 
     # 3) Filtro por centro (opcional)
@@ -2294,7 +2503,7 @@ def main():
             sys.exit(1)
 
     # 4) Fotos
-    print("📸 Procesando fotografías...")
+    print("[INFO] Procesando fotografias...")
     ctx, falt = add_photos_to_context(ctx, _read_consul(xlsx), fotos_root,
                                       fuzzy_threshold, tester_on, outdir,
                                       buscar_secuenciales, max_secuenciales, incluir_uris)

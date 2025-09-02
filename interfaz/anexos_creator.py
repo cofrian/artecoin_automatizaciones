@@ -61,21 +61,36 @@ class Anexo5Generator:
         """
         import subprocess
         import sys
-        args = [sys.executable, '-u', 'anejo5_orchestrator.py',
+        from pathlib import Path
+        
+        # Obtener la ruta del directorio actual del script
+        script_dir = Path(__file__).resolve().parent
+        orchestrator_path = script_dir / 'anejo5_orchestrator.py'
+        
+        # Ruta correcta para las carátulas
+        caratulas_path = script_dir.parent / 'word' / 'anexos' / 'CARATULAS'
+        
+        args = [sys.executable, '-u', str(orchestrator_path),
                 '--excel-dir', str(self.config.excel_dir),
                 '--photos-dir', str(self.config.photos_dir or ''),
                 '--html-templates-dir', str(self.config.html_templates_dir or ''),
-                '--caratulas-dir', str(self.config.output_dir or ''),
+                '--caratulas-dir', str(caratulas_path),
         ]
+        
+        # Agregar output-dir si se especifica
+        if self.config.output_dir:
+            args += ['--output-dir', str(self.config.output_dir)]
+        
         if self.config.center:
             args += ['--center', self.config.center]
+        
         # Limpiar argumentos vacíos
         args = [a for a in args if a != '']
         logger.info(f"[Anejo 5] Llamando orquestador: {' '.join(args)}")
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
-        for line in proc.stdout:
-            logger.info(line.rstrip())
-        proc.wait()
+        
+        # Ejecutar sin capturar salida para que aparezca inmediatamente en terminal
+        proc = subprocess.run(args, text=True, encoding="utf-8")
+        
         if proc.returncode != 0:
             logger.error(f"[ERROR] Orquestador terminó con código {proc.returncode}")
         else:
@@ -357,13 +372,37 @@ class _ContentChecker:
 
     def _has_shapes_content(self, page_range: CDispatch) -> bool:
         try:
+            # Verificar formas de manera más segura
+            if not hasattr(self.doc, 'Shapes'):
+                return False
+                
             page_start = page_range.Start
             page_end = page_range.End
-            for shape in self.doc.Shapes:
-                if self._is_shape_in_range(
-                    shape, page_start, page_end
-                ) and self._shape_has_text(shape):
-                    return True
+            
+            try:
+                shapes_count = self.doc.Shapes.Count
+                if shapes_count == 0:
+                    return False
+            except Exception:
+                # Si no podemos acceder a Shapes, asumir que no hay contenido de formas
+                return False
+                
+            # Revisar formas de manera más segura
+            try:
+                for i in range(1, shapes_count + 1):  # VBA indexing starts at 1
+                    try:
+                        shape = self.doc.Shapes(i)
+                        if self._is_shape_in_range(
+                            shape, page_start, page_end
+                        ) and self._shape_has_text(shape):
+                            return True
+                    except Exception:
+                        # Si una forma específica falla, continuar con la siguiente
+                        continue
+            except Exception:
+                # Si el acceso a formas falla completamente, asumir que no hay contenido
+                return False
+                
             return False
         except Exception:
             return False
@@ -451,6 +490,7 @@ class DefaultWordExporter:
     WD_EXPORT_ALL_DOCUMENT = 0
     WD_EXPORT_DOCUMENT_CONTENT = 0
     WD_EXPORT_CREATE_HEADING_BOOKMARKS = 1
+    WD_STATISTIC_PAGES = 2
 
     # Word field constants
     WD_FIELD_TOC = 13
@@ -567,30 +607,185 @@ class DefaultWordExporter:
 
     def remove_blank_pages_from_docx(self, docx_path: Path) -> int:
         pages_removed = 0
+        app = None
+        doc = None
+        
         try:
-            app, doc = self.open_document(docx_path, read_only=False)
+            logger.info(f"   -> Eliminando páginas en blanco de {docx_path.name}")
+            
+            # Inicializar COM de forma más robusta
+            pythoncom.CoInitialize()
+            
+            # Crear aplicación Word
+            app = win32_client.Dispatch("Word.Application")
+            app.Visible = False
+            app.ScreenUpdating = False
+            
             try:
+                app.DisplayAlerts = False
+            except Exception:
+                pass
+            
+            # Abrir documento
+            doc = app.Documents.Open(
+                str(docx_path),
+                ConfirmConversions=False,
+                ReadOnly=False,
+                AddToRecentFiles=False,
+                Visible=False,
+            )
+            
+            logger.info(f"   -> Documento abierto para limpieza de páginas")
+            
+            try:
+                # Repaginar para asegurar conteo correcto
                 doc.Repaginate()
-                total = int(doc.ComputeStatistics(_WordPageManager.WD_STATISTIC_PAGES))
-                mgr = _WordPageManager(doc)
-                for page in range(total, 0, -1):
-                    if mgr.is_page_blank(page):
-                        if mgr.delete_page(page):
-                            pages_removed += 1
-                doc.Repaginate()
-                self.update_toc(doc)
-                doc.Save()
-            finally:
-                doc.Close(SaveChanges=False)
-                app.Quit()
+                total_pages = int(doc.ComputeStatistics(self.WD_STATISTIC_PAGES))
+                logger.info(f"   -> Total de páginas: {total_pages}")
+                
+                if total_pages <= 1:
+                    logger.info("   -> Documento tiene solo 1 página, no se elimina nada")
+                    return 0
+                
+                # Revisar páginas de atrás hacia adelante
+                for page_num in range(total_pages, 0, -1):
+                    try:
+                        if self._is_page_blank_safe(doc, app, page_num):
+                            if self._delete_page_safe(doc, app, page_num):
+                                pages_removed += 1
+                                logger.info(f"   -> Página {page_num} eliminada")
+                                # Repaginar después de eliminar
+                                doc.Repaginate()
+                                total_pages = int(doc.ComputeStatistics(self.WD_STATISTIC_PAGES))
+                            
+                    except Exception as e:
+                        logger.warning(f"   ! Error procesando página {page_num}: {e}")
+                        continue
+                
+                if pages_removed > 0:
+                    # Actualizar tabla de contenidos si existe
+                    try:
+                        if doc.TablesOfContents.Count > 0:
+                            for toc in doc.TablesOfContents:
+                                toc.Update()
+                        doc.Save()
+                        logger.info(f"   ✓ {pages_removed} páginas en blanco eliminadas")
+                    except Exception as e:
+                        logger.warning(f"   ! Error actualizando TOC: {e}")
+                        doc.Save()
+                        
+            except Exception as e:
+                logger.error(f"   ! Error procesando páginas: {e}")
+                
         except Exception as e:
-            logger.error(f"remove_blank_pages_from_docx error: {e}")
+            logger.error(f"   ! Error abriendo documento para limpieza: {e}")
+            
         finally:
+            # Cerrar documento y aplicación de forma segura
+            if doc is not None:
+                try:
+                    doc.Close(SaveChanges=False)
+                except Exception as e:
+                    logger.warning(f"   ! Error cerrando documento: {e}")
+            
+            if app is not None:
+                try:
+                    app.Quit()
+                except Exception as e:
+                    logger.warning(f"   ! Error cerrando Word: {e}")
+            
             try:
                 pythoncom.CoUninitialize()
             except Exception:
                 pass
+                
         return pages_removed
+    
+    def _is_page_blank_safe(self, doc: CDispatch, app: CDispatch, page_num: int) -> bool:
+        """
+        Verifica si una página está en blanco de forma segura.
+        """
+        try:
+            # Ir a la página
+            app.Selection.GoTo(What=1, Which=1, Count=page_num)  # WD_GO_TO_PAGE, WD_GO_TO_ABSOLUTE
+            start_pos = app.Selection.Range.Start
+            
+            # Obtener final de la página
+            total_pages = int(doc.ComputeStatistics(2))  # WD_STATISTIC_PAGES
+            if page_num < total_pages:
+                app.Selection.GoTo(What=1, Which=1, Count=page_num + 1)
+                end_pos = app.Selection.Range.Start
+            else:
+                app.Selection.EndKey(Unit=6)  # WD_STORY
+                end_pos = app.Selection.Range.End
+            
+            if end_pos <= start_pos:
+                return False
+                
+            # Obtener el texto de la página de forma más segura
+            try:
+                page_range = doc.Range(Start=start_pos, End=end_pos)
+                page_text = page_range.Text.strip() if hasattr(page_range, 'Text') and page_range.Text else ""
+                
+                # Verificar si está vacía (solo espacios, saltos de línea, etc.)
+                if not page_text or len(page_text) <= 10:
+                    # Verificar elementos de forma más segura
+                    try:
+                        has_tables = hasattr(page_range, 'Tables') and page_range.Tables.Count > 0
+                    except:
+                        has_tables = False
+                        
+                    try:
+                        has_inline_shapes = hasattr(page_range, 'InlineShapes') and page_range.InlineShapes.Count > 0
+                    except:
+                        has_inline_shapes = False
+                        
+                    # No verificar Shapes ya que causa errores
+                    if not has_tables and not has_inline_shapes:
+                        return True
+                        
+            except Exception as e:
+                logger.warning(f"   ! Error accediendo al contenido de página {page_num}: {e}")
+                # Si no podemos acceder al contenido, asumir que no está vacía
+                return False
+                
+            return False
+            
+        except Exception as e:
+            logger.warning(f"   ! Error verificando página {page_num}: {e}")
+            return False
+    
+    def _delete_page_safe(self, doc: CDispatch, app: CDispatch, page_num: int) -> bool:
+        """
+        Elimina una página de forma segura.
+        """
+        try:
+            total_pages = int(doc.ComputeStatistics(2))  # WD_STATISTIC_PAGES
+            if not (1 <= page_num <= total_pages):
+                return False
+                
+            # Ir a la página
+            app.Selection.GoTo(What=1, Which=1, Count=page_num)
+            start_pos = app.Selection.Range.Start
+            
+            # Obtener final de la página
+            if page_num < total_pages:
+                app.Selection.GoTo(What=1, Which=1, Count=page_num + 1)
+                end_pos = app.Selection.Range.Start
+            else:
+                app.Selection.EndKey(Unit=6)  # WD_STORY
+                end_pos = app.Selection.Range.End
+                
+            if end_pos <= start_pos:
+                return False
+                
+            # Eliminar el contenido de la página
+            doc.Range(Start=start_pos, End=end_pos).Delete()
+            return True
+            
+        except Exception as e:
+            logger.error(f"   ! Error eliminando página {page_num}: {e}")
+            return False
 
     def update_word_fields_bulk(self, doc_paths: List[str]) -> None:
         """
@@ -683,16 +878,79 @@ class DefaultPdfInspector:
     def export_docx_to_temp_pdf(
         self, word: WordExporter, docx_path: Path, tmp_pdf: Path
     ) -> None:
-        app, doc = word.open_document(docx_path, read_only=False)
+        app = None
+        doc = None
+        
         try:
+            logger.info(f"   -> Exportando {docx_path.name} a PDF...")
+            
+            # Inicializar COM
+            pythoncom.CoInitialize()
+            
+            # Crear aplicación Word
+            app = win32_client.Dispatch("Word.Application")
+            app.Visible = False
+            app.ScreenUpdating = False
+            
             try:
+                app.DisplayAlerts = False
+            except Exception:
+                pass
+            
+            # Abrir documento
+            doc = app.Documents.Open(
+                str(docx_path),
+                ConfirmConversions=False,
+                ReadOnly=True,  # Solo lectura para exportar
+                AddToRecentFiles=False,
+                Visible=False,
+            )
+            
+            try:
+                # Repaginar si es posible
                 doc.Repaginate()
             except Exception:
                 pass
-            word.export_doc_to_pdf(doc, tmp_pdf)
+                
+            # Exportar a PDF
+            doc.ExportAsFixedFormat(
+                OutputFileName=str(tmp_pdf),
+                ExportFormat=17,  # wdExportFormatPDF
+                OpenAfterExport=False,
+                OptimizeFor=0,  # wdExportOptimizeForPrint
+                BitmapMissingFonts=True,
+                DocStructureTags=False,
+                CreateBookmarks=1  # wdExportCreateHeadingBookmarks
+            )
+            
+            logger.info(f"   ✓ PDF exportado: {tmp_pdf.name}")
+            
+        except Exception as e:
+            logger.error(f"   ! Error en exportación a PDF: {e}")
+            raise
+            
         finally:
-            doc.Close(SaveChanges=False)
-            app.Quit()
+            # Cerrar documento y aplicación de forma muy segura
+            if doc is not None:
+                try:
+                    doc.Close(SaveChanges=False)
+                except Exception as e:
+                    logger.warning(f"   ! Error cerrando documento para PDF: {e}")
+                    try:
+                        doc.Close()
+                    except:
+                        pass
+                        
+            if app is not None:
+                try:
+                    app.Quit()
+                except Exception as e:
+                    logger.warning(f"   ! Error cerrando Word para PDF: {e}")
+                    try:
+                        app.Quit()
+                    except:
+                        pass
+                        
             try:
                 pythoncom.CoUninitialize()
             except Exception:
@@ -1381,20 +1639,8 @@ def request_month_and_year(
 # =====================================================================================
 
 
-class AnexoGenerator(Protocol):
-    """Contrato común de generadores de anexos."""
-
-    anexo_number: int
-
-    def generate(
-        self,
-        excel_path: Path,
-        config_month: Optional[str] = None,
-        config_year: Optional[int] = None,
-    ) -> List[OutputFile]: ...
-
-
 class Anexo3Generator:
+
     anexo_number = 3
 
     def __init__(
@@ -1413,88 +1659,141 @@ class Anexo3Generator:
         self.out = out
         self.group_column = group_column
 
-    def _export_and_prune_pdf(
-        self,
-        docx_path: Path,
-        sections_empty_flags: Dict[str, bool],
-        excel_titles: Dict[str, str],
-    ) -> Optional[Path]:
-        final_pdf = docx_path.with_suffix(".pdf")
-        tmp_pdf = final_pdf.with_suffix(".tmp.pdf")
-        # 1) DOCX -> PDF temporal
-        self.pdf.export_docx_to_temp_pdf(self.word, docx_path, tmp_pdf)
-
-        # 2) Detectar páginas a eliminar
+    @staticmethod
+    def _delete_prev_page_break_if_any(doc: CDispatch, pos_start: int) -> None:
         try:
-            total_pages = self.pdf.read_total_pages(tmp_pdf)
-        except Exception as e:
-            logger.warning(f"   ! Error leyendo PDF temporal: {e}")
-            try:
-                final_pdf.unlink(missing_ok=True)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            tmp_pdf.replace(final_pdf)
-            return final_pdf
-
-        pages_to_delete: set[int] = set()
-        for key, is_empty in sections_empty_flags.items():
-            if not is_empty:
-                continue
-            title_text = excel_titles.get(key)
-            if not title_text:
-                continue
-            logger.info(f"   -> Buscando sección vacía: '{title_text}' (key: {key})")
-            title_page_index = self.pdf.find_title_page_in_pdf(tmp_pdf, title_text)
-            if title_page_index is not None:
-                pages_to_delete.add(title_page_index)
-                if title_page_index + 1 <= total_pages:
-                    pages_to_delete.add(title_page_index + 1)
-
-        logger.info(f"   -> Páginas a eliminar: {sorted(pages_to_delete)}")
-
-        # 3) Si hay que borrar, hacerlo en el DOCX y reexportar el PDF
-        if pages_to_delete:
-            try:
-                tmp_pdf.unlink(missing_ok=True)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            app, doc = self.word.open_document(docx_path, read_only=False)
-            try:
-                self.word.delete_pages(doc, pages_to_delete)
-                self.word.update_toc(doc)
-                doc.Save()
-                self.word.export_doc_to_pdf(doc, tmp_pdf)
-            finally:
-                doc.Close(SaveChanges=False)
-                app.Quit()
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
-
-            # quedar con PDF final sin páginas (casi) en blanco
-            try:
-                final_pdf.unlink(missing_ok=True)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            try:
-                self.pdf.remove_blank_pages_from_pdf(tmp_pdf)
-            except Exception as e:
-                logger.warning(f"   ! Limpieza PDF: {e}")
-            tmp_pdf.replace(final_pdf)
-            return final_pdf
-
-        # 4) si no hay cambios
-        try:
-            final_pdf.unlink(missing_ok=True)  # type: ignore[attr-defined]
+            if pos_start <= 0:
+                return
+            prev_rng = doc.Range(Start=max(0, pos_start - 1), End=pos_start)
+            if prev_rng.Text == "\f":
+                prev_rng.Delete()
         except Exception:
             pass
-        tmp_pdf.replace(final_pdf)
+
+    @staticmethod
+    def _range_for_title(doc: CDispatch, title_text: str) -> Optional[CDispatch]:
+        try:
+            rng = doc.Content
+            find = rng.Find
+            find.ClearFormatting()
+            find.Text = title_text
+            found = find.Execute()
+            return rng if found else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _table_after_range(doc: CDispatch, rng: CDispatch) -> Optional[CDispatch]:
+        try:
+            for step in (200, 1000, 3000):
+                probe = doc.Range(Start=rng.End, End=min(rng.End + step, doc.Content.End))
+                if probe.Tables.Count > 0:
+                    return probe.Tables(1).Range
+            return None
+        except Exception:
+            return None
+
+    def _remove_empty_section_by_title(self, doc: CDispatch, title_text: Optional[str]) -> bool:
+        if not title_text:
+            return False
+
+        title_rng = self._range_for_title(doc, title_text)
+        if title_rng is None:
+            return False
+
+        tbl_rng = self._table_after_range(doc, title_rng)
+        if tbl_rng is None:
+            try:
+                self._delete_prev_page_break_if_any(doc, title_rng.Start)
+                title_rng.Delete()
+                return True
+            except Exception:
+                return False
+
+        try:
+            tbl = tbl_rng.Tables(1)
+            rows = int(tbl.Rows.Count)
+        except Exception:
+            rows = 0
+
+        if rows <= 2:
+            try:
+                tbl.Range.Delete()
+            except Exception:
+                pass
+            try:
+                self._delete_prev_page_break_if_any(doc, title_rng.Start)
+                doc.Range(Start=title_rng.Start, End=title_rng.End).Delete()
+            except Exception:
+                pass
+            return True
+
+        return False
+
+    def _postprocess_word_remove_empty_sections(
+        self,
+        doc_path: Path,
+        sections_empty_flags: Dict[str, bool],
+        excel_titles: Dict[str, str],
+    ) -> None:
+        app, doc = self.word.open_document(doc_path, read_only=False)
+        try:
+            for key, is_empty in sections_empty_flags.items():
+                if not is_empty:
+                    continue
+                title_text = excel_titles.get(key)
+                try:
+                    if self._remove_empty_section_by_title(doc, title_text):
+                        pass
+                except Exception as e:
+                    pass
+
+            try:
+                doc.Repaginate()
+            except Exception:
+                pass
+            self.word.update_toc(doc)
+            try:
+                doc.Save()
+            except Exception:
+                pass
+        finally:
+            try:
+                doc.Close(SaveChanges=False)
+            except Exception:
+                pass
+            try:
+                app.Quit()
+            except Exception:
+                pass
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+    def _export_pdf_simple(self, docx_path: Path) -> Optional[Path]:
+        final_pdf = docx_path.with_suffix(".pdf")
+        tmp_pdf = docx_path.with_suffix(".tmp.pdf")
+        try:
+            self.pdf.export_docx_to_temp_pdf(self.word, docx_path, tmp_pdf)
+        except Exception as e:
+            return None
+
+        try:
+            final_pdf.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            tmp_pdf.replace(final_pdf)
+        except Exception:
+            pass
+
         try:
             self.pdf.remove_blank_pages_from_pdf(final_pdf)
         except Exception:
             pass
-        return final_pdf
+
+        return final_pdf if final_pdf.exists() else None
 
     def generate(
         self,
@@ -1504,22 +1803,15 @@ class Anexo3Generator:
     ) -> List[OutputFile]:
         month_name, year = request_month_and_year(config_month, config_year)
         self.word.close_word_processes()
-
         tables = self.excel.load_sheets_for_anexo3(excel_path)
-
-        # Determinar la columna de agrupación efectiva usando la primera tabla disponible
         first_table = next(iter(tables.values()))
         effective_group_col = DefaultExcelRepository._get_effective_group_column(
             first_table, self.group_column
         )
         centers = self.excel.extract_unique_groups(effective_group_col, tables)
-        logger.info(
-            f"-> Se generarán documentos para {len(centers)} {effective_group_col.lower()}s"
-        )
-
-        tpl_bytes = self.templates.get_template(self.anexo_number)
-
         outputs: List[OutputFile] = []
+        targets = get_target_centers_from_config(CONFIG)
+
         for center in centers:
             (
                 df_clima_grupo,
@@ -1545,33 +1837,25 @@ class Anexo3Generator:
             ):
                 continue
 
-            targets = get_target_centers_from_config(CONFIG)
-            center_id = DefaultExcelRepository.extract_center_id([
-                df_clima_grupo, df_sist_cc_grupo, df_eleva_grupo,
-                df_eqhoriz_grupo, df_ilum_grupo, df_otros_eq_grupo
-            ])
-            targets = get_target_centers_from_config(CONFIG)  # type: ignore[name-defined]
+            center_id = DefaultExcelRepository.extract_center_id(
+                [
+                    df_clima_grupo,
+                    df_sist_cc_grupo,
+                    df_eleva_grupo,
+                    df_eqhoriz_grupo,
+                    df_ilum_grupo,
+                    df_otros_eq_grupo,
+                ]
+            )
             if targets and normalize_center_id(center_id) not in targets:
                 continue
 
-            totales_clima = self.excel.calculate_totals_by_center(
-                tables["Clima"], df_clima_grupo
-            )
-            totales_sist_cc = self.excel.calculate_totals_by_center(
-                tables["SistCC"], df_sist_cc_grupo
-            )
-            totales_eleva = self.excel.calculate_totals_by_center(
-                tables["Eleva"], df_eleva_grupo
-            )
-            totales_eqhoriz = self.excel.calculate_totals_by_center(
-                tables["EqHoriz"], df_eqhoriz_grupo
-            )
-            totales_ilum = self.excel.calculate_totals_by_center(
-                tables["Ilum"], df_ilum_grupo
-            )
-            totales_otros_eq = self.excel.calculate_totals_by_center(
-                tables["OtrosEq"], df_otros_eq_grupo
-            )
+            totales_clima = self.excel.calculate_totals_by_center(tables["Clima"], df_clima_grupo)
+            totales_sist_cc = self.excel.calculate_totals_by_center(tables["SistCC"], df_sist_cc_grupo)
+            totales_eleva = self.excel.calculate_totals_by_center(tables["Eleva"], df_eleva_grupo)
+            totales_eqhoriz = self.excel.calculate_totals_by_center(tables["EqHoriz"], df_eqhoriz_grupo)
+            totales_ilum = self.excel.calculate_totals_by_center(tables["Ilum"], df_ilum_grupo)
+            totales_otros_eq = self.excel.calculate_totals_by_center(tables["OtrosEq"], df_otros_eq_grupo)
 
             ctx = {
                 "mes": month_name,
@@ -1591,33 +1875,12 @@ class Anexo3Generator:
                 "totales_otros_eq": [totales_otros_eq],
             }
 
-            doc = DocxTemplate(BytesIO(tpl_bytes))
+            doc = DocxTemplate(BytesIO(self.templates.get_template(self.anexo_number)))
             doc.render(ctx)
 
-            center_id = DefaultExcelRepository.extract_center_id(
-                [
-                    df_clima_grupo,
-                    df_sist_cc_grupo,
-                    df_eleva_grupo,
-                    df_eqhoriz_grupo,
-                    df_ilum_grupo,
-                    df_otros_eq_grupo,
-                ]
-            )
-
             out_name = "03_ANEJO 3. INVENTARIO ENERGETICO.docx"
-            out_path = self.out.build_output_docx_path(CONFIG, center_id, out_name)  # type: ignore[name-defined]
+            out_path = self.out.build_output_docx_path(CONFIG, center_id, out_name)
             doc.save(str(out_path))
-
-            logger.info(f"   -> Eliminando páginas en blanco de {out_name}")
-            try:
-                removed = self.word.remove_blank_pages_from_docx(out_path)
-                if removed > 0:
-                    logger.info(f"   ✓ {removed} páginas en blanco eliminadas")
-                else:
-                    logger.info("   ✓ No se encontraron páginas en blanco")
-            except Exception as e:
-                logger.warning(f"   ! Error eliminando páginas en blanco: {e}")
 
             sections_empty = {
                 "Clima": df_clima_grupo.empty,
@@ -1628,18 +1891,22 @@ class Anexo3Generator:
                 "OtrosEq": df_otros_eq_grupo.empty,
             }
 
-            pdf_path = None
-            try:
-                pdf_path = self._export_and_prune_pdf(
-                    out_path, sections_empty, DefaultExcelRepository.SHEETS_MAP
-                )
-            except Exception as e:
-                logger.warning(f"   ! No se pudo generar PDF limpio: {e}")
+            self._postprocess_word_remove_empty_sections(
+                out_path, sections_empty, DefaultExcelRepository.SHEETS_MAP
+            )
 
-            logger.info(f"* Documento generado: {center_id}/{out_name}")
+            try:
+                removed = self.word.remove_blank_pages_from_docx(out_path)
+            except Exception:
+                pass
+
+            pdf_path = self._export_pdf_simple(out_path)
+
             outputs.append(OutputFile(docx_path=out_path, pdf_path=pdf_path))
 
         return outputs
+
+
 
 
 class Anexo2Generator:
@@ -1834,7 +2101,7 @@ class Anexo4Generator:
 
             center_id = DefaultExcelRepository.extract_center_id([df_envol_grupo])
 
-            out_name = "04_ANEJO 4. INVENTARIO  CONSTRUCTIVO.docx"
+            out_name = "04_ANEJO 4. INVENTARIO CONSTRUCTIVO.docx"
             out_path = self.out.build_output_docx_path(CONFIG, center_id, out_name)  # type: ignore[name-defined]
             doc.save(str(out_path))
 
@@ -2435,11 +2702,27 @@ class MoveToNASService:
 
     def _find_nas_dest_for_center(self, center_id: str) -> Optional[Path]:
         center_id = center_id.upper()
+        
+        # Buscar primero en el nivel superior
         for d in self.nas_centers_dir.iterdir():
             if not d.is_dir():
                 continue
             if center_id in d.name.upper():
                 return d / "ANEJOS"
+        
+        # Si no encuentra en nivel superior, buscar en subdirectorios (un nivel más profundo)
+        for parent_dir in self.nas_centers_dir.iterdir():
+            if not parent_dir.is_dir():
+                continue
+            try:
+                for sub_dir in parent_dir.iterdir():
+                    if not sub_dir.is_dir():
+                        continue
+                    if center_id in sub_dir.name.upper():
+                        return sub_dir / "ANEJOS"
+            except (PermissionError, OSError):
+                continue
+                
         return None
 
     @staticmethod
@@ -2714,7 +2997,9 @@ def run_move_to_nas(config: RunConfig) -> int:
 
     # 3) Carpetas típicas alrededor del script y CWD
     script_dir = Path(__file__).resolve().parent
-    for p in [Path.cwd(), script_dir, script_dir / "word", script_dir / "plantillas", script_dir / "templates"]:
+    # Añadir específicamente la carpeta word/anexos donde están los archivos del Anejo 1
+    word_anexos_dir = script_dir.parent / "word" / "anexos"
+    for p in [Path.cwd(), script_dir, script_dir / "word", script_dir / "plantillas", script_dir / "templates", word_anexos_dir]:
         if p.exists():
             candidate_dirs.append(p)
 
@@ -2727,25 +3012,33 @@ def run_move_to_nas(config: RunConfig) -> int:
             seen.add(d)
 
     def _find_file(basename: str) -> Optional[Path]:
+        # Buscar primero en las carpetas candidatas
         for d in uniq_dirs:
             cand = d / basename
             if cand.exists():
                 return cand
+        
+        # Si no se encuentra, intentar buscar en la ruta absoluta conocida como fallback
+        if basename in ["01_ANEJO 1. METODOLOGIA_V1.pdf", "01_ANEJO 1. METODOLOGIA_V1.docx"]:
+            fallback_path = Path(r"Y:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\github_app\artecoin_automatizaciones\word\anexos") / basename
+            if fallback_path.exists():
+                return fallback_path
+        
         return None
 
-    # Localizar las plantillas del Anejo 1 (sin parámetros)
-    anexo1_docx = _find_file("Plantilla_Anexo_1.docx")
-    anexo1_pdf  = _find_file("Plantilla_Anexo_1.pdf")
+    # Localizar las plantillas del Anejo 1 (sin parámetros) - nuevo formato
+    anexo1_docx = _find_file("01_ANEJO 1. METODOLOGIA_V1.docx")
+    anexo1_pdf  = _find_file("01_ANEJO 1. METODOLOGIA_V1.pdf")
 
     anexo1_files: list[tuple[Path, str]] = []
     if anexo1_docx:
         anexo1_files.append((anexo1_docx, anexo1_docx.name))
     else:
-        logger.warning("No se encontró 'Plantilla_Anexo_1.docx' en las carpetas conocidas.")
+        logger.warning("No se encontró '01_ANEJO 1. METODOLOGIA_V1.docx' en las carpetas conocidas.")
     if anexo1_pdf:
         anexo1_files.append((anexo1_pdf, anexo1_pdf.name))
     else:
-        logger.warning("No se encontró 'Plantilla_Anexo_1.pdf' en las carpetas conocidas.")
+        logger.warning("No se encontró '01_ANEJO 1. METODOLOGIA_V1.pdf' en las carpetas conocidas.")
 
     targets = get_target_centers_from_config(config)
     svc = MoveToNASService(

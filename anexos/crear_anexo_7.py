@@ -341,7 +341,6 @@ def main():
     print(f"Se encontraron {len(edificios)} edificios.")
 
     # Convertir plantilla UNA vez a PDF en ubicación temporal
-    import tempfile
 
     with tempfile.TemporaryDirectory() as temp_dir:
         plantilla_pdf_compartida = Path(temp_dir) / "_Anexo_7__plantilla.pdf"

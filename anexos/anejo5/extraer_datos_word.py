@@ -82,11 +82,6 @@ def _init_gui():
     root = tk.Tk()
     root.withdraw()  # Ocultar ventana principal
     return root
-def _init_gui():
-    """Inicializa la interfaz gráfica de tkinter."""
-    root = tk.Tk()
-    root.withdraw()  # Ocultar ventana principal
-    return root
 
 def _solicitar_excel() -> Path:
     """Solicita al usuario el archivo Excel usando interfaz gráfica o texto."""
@@ -1310,11 +1305,6 @@ def _fallback_candidates_optimized(ident: str, exact_index: dict, normalized_ind
     
     return fotos_unicas[:max_photos]
 
-def _leaf_id(ident: str) -> str:
-    s = str(ident or "").upper().strip()
-    m = re.search(r'([A-Z]{1,3}0*\d{1,5})$', s)
-    return m.group(1) if m else s
-
 def _buscar_fotos_secuenciales(fotos_base: str, index: Dict[str, Path]) -> List[Path]:
     """Busca fotos adicionales con secuencia incremental a partir de una foto base."""
     rutas_extra = []
@@ -1860,7 +1850,6 @@ def add_photos_to_context(ctx_all: List[Dict], df_consul: Optional[pd.DataFrame]
                 
                 # EXCEPCIÓN ESPECIAL: Fotos del estilo C001, C0001, C007, etc. (código de centro)
                 # Estas siempre van al centro porque solo hay uno y evitamos problemas
-                import re
                 if tipo == "CENTRO" and re.match(r'^C0*\d+$', foto_id_part):
                     incluir_foto = True
                 

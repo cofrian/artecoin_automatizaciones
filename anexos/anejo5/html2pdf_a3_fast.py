@@ -10,7 +10,7 @@ Salida:
 
 import argparse
 import asyncio
-# import sys  # Removed unused import
+import sys
 from pathlib import Path
 from urllib.parse import quote
 from collections import defaultdict
@@ -225,7 +225,6 @@ def crear_anejo_final_por_centro(args, out_root: Path, centros: set[str]):
     Genera un Anejo5_Reportaje_Fotografico.pdf por cada centro dentro de <out_root>/<CENTRO>.
     Usa las mismas carátulas para todos (si existen).
     """
-    from pypdf import PdfWriter
 
     orden_secciones = [
         ("PORTADA.pdf", None),

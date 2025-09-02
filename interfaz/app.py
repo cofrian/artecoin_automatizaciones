@@ -32,6 +32,7 @@ import subprocess
 import ctypes
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Tuple, List
 
 import customtkinter as ctk
@@ -282,7 +283,7 @@ class ProcessRunner:
             text=True,
             encoding="utf-8",
             errors="replace",
-            bufsize=1,
+            bufsize=0,  # Sin buffering para output inmediato
             universal_newlines=True,
             creationflags=creationflags,
             env=env_utf8,
@@ -290,10 +291,24 @@ class ProcessRunner:
 
         def _reader() -> None:
             assert self._proc is not None
-            for line in self._proc.stdout:  # type: ignore[union-attr]
-                self._log_queue.put(line.rstrip("\n"))
-            self._proc.wait()
-            self._log_queue.put(f"--- Proceso finalizado. Código: {self._proc.returncode} ---")
+            try:
+                while True:
+                    # Leer línea por línea para mostrar output inmediato
+                    line = self._proc.stdout.readline()
+                    if not line and self._proc.poll() is not None:
+                        break
+                    if line:
+                        self._log_queue.put(line.rstrip("\r\n"))
+                        # Forzar flush inmediato
+                        try:
+                            self._proc.stdout.flush()
+                        except:
+                            pass
+            except Exception as e:
+                self._log_queue.put(f"[ERROR] Lectura del proceso: {e}")
+            finally:
+                self._proc.wait()
+                self._log_queue.put(f"--- Proceso finalizado. Código: {self._proc.returncode} ---")
 
         self._reader_thread = threading.Thread(target=_reader, daemon=True)
         self._reader_thread.start()
@@ -332,7 +347,7 @@ class ProcessRunner:
             cmd += ["--year", str(opts.year)]
 
         if getattr(opts, "center", None):
-            cmd += ["--centers", str(opts.center)]
+            cmd += ["--center", str(opts.center)]
 
         self._launch(cmd)
 
@@ -383,6 +398,86 @@ class ProcessRunner:
                 pass
         self._log_queue.put("--- Proceso detenido por el usuario ---")
 
+    def run_async(self, cmd: List[str], callback_line=None, callback_finished=None) -> None:
+        """
+        Ejecuta un comando arbitrario de forma asíncrona.
+        
+        Args:
+            cmd: Lista con el comando y argumentos
+            callback_line: Función que se llama por cada línea de salida
+            callback_finished: Función que se llama cuando termina el proceso
+        """
+        if self.is_running():
+            raise RuntimeError("Ya hay un proceso en ejecución.")
+        
+        # Log del comando para depuración
+        try:
+            self._log_queue.put("CMD: " + " ".join(cmd))
+        except Exception:
+            pass
+
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        # Forzar UTF-8
+        env_utf8 = dict(os.environ)
+        env_utf8.setdefault("PYTHONIOENCODING", "utf-8")
+
+        self._proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=0,  # Sin buffering para output inmediato
+            universal_newlines=True,
+            creationflags=creationflags,
+            env=env_utf8,
+        )
+
+        def _reader() -> None:
+            assert self._proc is not None
+            try:
+                while True:
+                    # Leer línea por línea para mostrar output inmediato
+                    line = self._proc.stdout.readline()
+                    if not line and self._proc.poll() is not None:
+                        break
+                    if line:
+                        line_clean = line.rstrip("\r\n")
+                        if callback_line:
+                            callback_line(line_clean)
+                        else:
+                            self._log_queue.put(line_clean)
+                        # Forzar flush inmediato
+                        try:
+                            self._proc.stdout.flush()
+                        except:
+                            pass
+            except Exception as e:
+                error_msg = f"[ERROR] Lectura del proceso: {e}"
+                if callback_line:
+                    callback_line(error_msg)
+                else:
+                    self._log_queue.put(error_msg)
+            finally:
+                self._proc.wait()
+                finish_msg = f"--- Proceso finalizado. Código: {self._proc.returncode} ---"
+                if callback_line:
+                    callback_line(finish_msg)
+                else:
+                    self._log_queue.put(finish_msg)
+                
+                # Llamar callback de finalización
+                if callback_finished:
+                    callback_finished(self._proc.returncode)
+
+        self._reader_thread = threading.Thread(target=_reader, daemon=True)
+        self._reader_thread.start()
+
 
 # ---------------------------
 # Vista / Controlador (customtkinter)
@@ -407,8 +502,8 @@ class AnexosApp(ctk.CTk):
             pass
         
         self.title(APP_NAME)
-        self.geometry("1200x850")
-        self.minsize(980, 720)
+        self.geometry("1800x1200")
+        self.minsize(1600, 1000)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.runner = ProcessRunner(self.log_queue)
@@ -421,12 +516,14 @@ class AnexosApp(ctk.CTk):
         self.tabs.pack(fill="both", expand=True, padx=10, pady=10)
         self.tab_generacion = self.tabs.add("Generación de Anejos")
         self.tab_move = self.tabs.add("Mover anexos al NAS")
+        self.tab_memoria = self.tabs.add("Memoria Final")
         self.tab_terminal = self.tabs.add("Historial de ejecución")
 
         # 3) Vistas
         self._build_terminal_tab()
         self._build_generacion_tab()
         self._build_move_tab()
+        self._build_memoria_tab()
 
         # 4) Config y ciclo de logs
         self._apply_saved_config()
@@ -694,6 +791,99 @@ class AnexosApp(ctk.CTk):
         self.txt_mv_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
         self._log_mv("Configura las carpetas y pulsa 'Mover al NAS'.")
 
+    def _build_memoria_tab(self):
+        """Construye la pestaña para generar memoria final."""
+        pad = {"padx": 14, "pady": 8}
+        
+        # Título
+        ctk.CTkLabel(self.tab_memoria, text="Generar Memoria Final", 
+                    font=ctk.CTkFont(size=24, weight="bold")).pack(**pad, anchor="w")
+        
+        # Frame principal sin scroll
+        main_frame = ctk.CTkFrame(self.tab_memoria)
+        main_frame.pack(fill="both", expand=True, **pad)
+        
+        # Sección de configuración
+        config_frame = ctk.CTkFrame(main_frame)
+        config_frame.pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkLabel(config_frame, text="Configuración", 
+                    font=ctk.CTkFont(size=18, weight="bold")).pack(**pad, anchor="w")
+        
+        # Carpeta NAS (06_REDACCION)
+        ctk.CTkLabel(config_frame, text="Carpeta NAS (06_REDACCION):").pack(**pad, anchor="w")
+        input_frame = ctk.CTkFrame(config_frame)
+        input_frame.pack(fill="x", **pad)
+        self.entry_memoria_input = ctk.CTkEntry(input_frame, textvariable=self.memoria_input_dir,
+                                               placeholder_text="Y:/2025/.../06_REDACCION")
+        self.entry_memoria_input.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(input_frame, text="...", width=40, 
+                     command=self._browse_memoria_input).pack(side="right")
+        
+        # Centro específico (opcional)
+        ctk.CTkLabel(config_frame, text="Centro específico (opcional):").pack(**pad, anchor="w")
+        self.entry_memoria_center = ctk.CTkEntry(config_frame, textvariable=self.memoria_center, 
+                                               placeholder_text="C0007 (vacío = todos los centros)")
+        self.entry_memoria_center.pack(fill="x", **pad)
+        
+        # Plantilla de índices
+        ctk.CTkLabel(config_frame, text="Plantilla de índices:").pack(**pad, anchor="w")
+        template_frame = ctk.CTkFrame(config_frame)
+        template_frame.pack(fill="x", **pad)
+        self.entry_memoria_template = ctk.CTkEntry(template_frame, textvariable=self.memoria_template_path,
+                                                  placeholder_text="Seleccionar plantilla...")
+        self.entry_memoria_template.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(template_frame, text="...", width=40, 
+                     command=self._browse_memoria_template).pack(side="right")
+        
+        # Tipo de acción
+        ctk.CTkLabel(config_frame, text="Acción a realizar:").pack(**pad, anchor="w")
+        self.memoria_action = ctk.StringVar(value="all")
+        action_frame = ctk.CTkFrame(config_frame)
+        action_frame.pack(fill="x", **pad)
+        
+        ctk.CTkRadioButton(action_frame, text="Solo índices", variable=self.memoria_action, 
+                          value="indices").pack(side="left", padx=(0, 20))
+        ctk.CTkRadioButton(action_frame, text="Solo memoria PDF", variable=self.memoria_action, 
+                          value="memoria").pack(side="left", padx=(0, 20))
+        ctk.CTkRadioButton(action_frame, text="Ambos", variable=self.memoria_action, 
+                          value="all").pack(side="left")
+        
+        # Información
+        info_frame = ctk.CTkFrame(main_frame)
+        info_frame.pack(fill="x", pady=(10, 0))
+        
+        info_text = """ℹ️ INFORMACIÓN:
+• Índices: Genera 001_INDICE_GENERAL_COMPLETADO en Word y PDF en cada centro
+• Memoria PDF: Combina PORTADA + ÍNDICE + AUDITORÍA + ANEJOS en MEMORIA_COMPLETA.pdf
+• Los archivos se generan directamente en las carpetas de cada centro del NAS"""
+        
+        ctk.CTkLabel(info_frame, text=info_text, font=ctk.CTkFont(size=16, weight="bold"), 
+                    justify="left").pack(**pad, anchor="w")
+        
+        # Botones de acción
+        btn_frame = ctk.CTkFrame(self.tab_memoria)
+        btn_frame.pack(fill="x", **pad)
+        
+        self.btn_memoria_generate = ctk.CTkButton(btn_frame, text="Generar", 
+                                                 command=self._on_generate_memoria,
+                                                 font=ctk.CTkFont(size=16, weight="bold"), 
+                                                 height=40)
+        self.btn_memoria_generate.pack(side="left", padx=8, pady=12)
+        
+        self.btn_memoria_stop = ctk.CTkButton(btn_frame, text="Cancelar", 
+                                            command=self._on_memoria_stop,
+                                            font=ctk.CTkFont(size=16, weight="bold"),
+                                            height=40,
+                                            fg_color="gray40", hover_color="gray30")
+        self.btn_memoria_stop.pack(side="left", padx=8, pady=12)
+        
+        # Logs de memoria
+        ctk.CTkLabel(self.tab_memoria, text="Salida:", font=ctk.CTkFont(size=20, weight="bold")).pack(**pad, anchor="w")
+        self.txt_memoria_logs = ctk.CTkTextbox(self.tab_memoria, height=360, font=ctk.CTkFont(size=16))
+        self.txt_memoria_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
+        self._log_memoria("Configura la carpeta NAS y pulsa 'Generar'.")
+
     # ----- estado (tk variables) -----
 
     def _build_state(self) -> None:
@@ -725,6 +915,16 @@ class AnexosApp(ctk.CTk):
         self.mv_centers_expr = StringVar(value="")
         self.mv_dry_run = ctk.BooleanVar(value=False)
 
+        # Memoria Final
+        self.memoria_input_dir = StringVar(value="")  # Carpeta NAS 06_REDACCION
+        self.memoria_output_dir = StringVar(value="")  # No usado (se genera in-situ)
+        self.memoria_center = StringVar(value="")  # Centro específico (opcional)
+        self.memoria_action = ctk.StringVar(value="all")  # Acción: indices, memoria, all
+        self.memoria_template_path = StringVar(value="")  # Plantilla de índices
+
+        # Control del estado de botones para evitar parpadeo
+        self._last_runner_state = False
+
 
     # ----- helpers UI comunes -----
 
@@ -744,6 +944,14 @@ class AnexosApp(ctk.CTk):
             self.txt_mv_logs.insert("end", text + "\n")
             self.txt_mv_logs.see("end")
             self.txt_mv_logs.configure(state="disabled")
+
+    def _log_memoria(self, text: str) -> None:
+        # Logs de la pestaña "Memoria Final"
+        if hasattr(self, "txt_memoria_logs"):
+            self.txt_memoria_logs.configure(state="normal")
+            self.txt_memoria_logs.insert("end", text + "\n")
+            self.txt_memoria_logs.see("end")
+            self.txt_memoria_logs.configure(state="disabled")
 
     def _snapshot_config(self) -> dict:
         """Toma un snapshot del estado actual para persistir en ConfigStore."""
@@ -781,6 +989,13 @@ class AnexosApp(ctk.CTk):
             "mv_nas_root": (self.mv_nas_root.get() or "").strip(),
             "mv_centers_expr": (self.mv_centers_expr.get() or "").strip(),
             "mv_dry_run": bool(self.mv_dry_run.get()),
+
+            # Memoria Final
+            "memoria_input_dir": (self.memoria_input_dir.get() or "").strip(),
+            "memoria_output_dir": (self.memoria_output_dir.get() or "").strip(),
+            "memoria_center": (self.memoria_center.get() or "").strip(),
+            "memoria_action": self.memoria_action.get(),
+            "memoria_template_path": (self.memoria_template_path.get() or "").strip(),
         }
 
         
@@ -788,7 +1003,14 @@ class AnexosApp(ctk.CTk):
     # ----- browsers -----
 
     def _choose_excel(self) -> None:
-        path = filedialog.askdirectory(title="Selecciona carpeta de Excel")
+        # Sugerir la carpeta proyecto por defecto si existe
+        default_path = os.path.join(os.getcwd(), "excel", "proyecto")
+        initial_dir = default_path if os.path.isdir(default_path) else None
+        
+        path = filedialog.askdirectory(
+            title="Selecciona carpeta de Excel",
+            initialdir=initial_dir
+        )
         if path:
             self.excel_dir.set(path)
 
@@ -837,6 +1059,20 @@ class AnexosApp(ctk.CTk):
         path = filedialog.askdirectory(title="Selecciona la carpeta del NAS con las carpetas de los centros (p.ej. 02_UN EDIFICIO)")
         if path:
             self.mv_nas_root.set(path)
+
+    def _browse_memoria_input(self) -> None:
+        path = filedialog.askdirectory(title="Selecciona la carpeta NAS 06_REDACCION")
+        if path:
+            self.memoria_input_dir.set(path)
+
+    def _browse_memoria_template(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Selecciona la plantilla de índices",
+            filetypes=[("Archivos Word", "*.docx"), ("Todos los archivos", "*.*")],
+            initialdir="Y:/DOCUMENTACION TRABAJO/CARPETAS PERSONAL/SO/github_app/artecoin_automatizaciones/word/anexos"
+        )
+        if path:
+            self.memoria_template_path.set(path)
 
     # ----- eventos -----
 
@@ -914,6 +1150,16 @@ class AnexosApp(ctk.CTk):
         self.mv_nas_root.set(cfg.get("mv_nas_root", ""))
         self.mv_centers_expr.set(cfg.get("mv_centers_expr", ""))
         self.mv_dry_run.set(cfg.get("mv_dry_run", False))
+
+        # Memoria Final
+        self.memoria_input_dir.set(cfg.get("memoria_input_dir", ""))
+        self.memoria_output_dir.set(cfg.get("memoria_output_dir", ""))
+        self.memoria_center.set(cfg.get("memoria_center", ""))
+        self.memoria_action.set(cfg.get("memoria_action", "all"))
+        
+        # Establecer plantilla por defecto si no hay una guardada
+        default_template = r"Y:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\github_app\artecoin_automatizaciones\word\anexos\001_INDICE GENERAL_PLANTILLA.docx"
+        self.memoria_template_path.set(cfg.get("memoria_template_path", default_template))
 
 
     # ----- helpers generación -----
@@ -1041,12 +1287,99 @@ class AnexosApp(ctk.CTk):
             self.btn_mv_stop.configure(state="disabled")
             messagebox.showerror(APP_NAME, f"Error al iniciar el movimiento:\n{e}", parent=self)
 
+    def _on_generate_memoria(self) -> None:
+        """Ejecuta la generación de memoria final."""
+        # Validación básica
+        input_dir = self.memoria_input_dir.get().strip()
+        center = self.memoria_center.get().strip()
+        action = self.memoria_action.get()
+        template_path = self.memoria_template_path.get().strip()
+        
+        if not input_dir:
+            messagebox.showerror(APP_NAME, "Debes seleccionar la carpeta NAS (06_REDACCION).", parent=self)
+            return
+            
+        # Validar template path si se especifica
+        if template_path and not Path(template_path).exists():
+            messagebox.showerror(APP_NAME, f"La plantilla especificada no existe:\n{template_path}", parent=self)
+            return
+            
+        # Guardar configuración
+        ConfigStore.save(self._snapshot_config())
+        
+        try:
+            # Limpiar logs previos
+            self.txt_memoria_logs.configure(state="normal")
+            self.txt_memoria_logs.delete("1.0", "end")
+            self.txt_memoria_logs.configure(state="disabled")
+            
+            self._log_memoria("=== Iniciando generación de memoria final ===")
+            self._log_memoria(f"Carpeta NAS: {input_dir}")
+            if center:
+                self._log_memoria(f"Centro específico: {center}")
+            else:
+                self._log_memoria("Procesando todos los centros")
+            self._log_memoria(f"Acción: {action}")
+            if template_path:
+                self._log_memoria(f"Plantilla: {template_path}")
+            self._log_memoria("")
+            
+            # Construir comando
+            script_path = Path(__file__).parent / "render_memoria.py"
+            cmd = [
+                sys.executable, "-u", str(script_path),
+                "--input-dir", input_dir,
+                "--action", action
+            ]
+            
+            if center:
+                cmd.extend(["--center", center])
+            
+            if template_path:
+                cmd.extend(["--template-path", template_path])
+            
+            cmd_str = " ".join(f'"{arg}"' if " " in arg else arg for arg in cmd)
+            self._log_memoria(f"CMD: {cmd_str}")
+            
+            # Configurar botones
+            self.btn_memoria_generate.configure(state="disabled")
+            self.btn_memoria_stop.configure(state="normal")
+            
+            # Ejecutar
+            self.runner.run_async(
+                cmd=cmd,
+                callback_line=lambda line: self.log_queue.put(("memoria", line)),
+                callback_finished=self._on_memoria_finished
+            )
+            
+        except Exception as e:
+            self.btn_memoria_generate.configure(state="normal")
+            self.btn_memoria_stop.configure(state="disabled")
+            messagebox.showerror(APP_NAME, f"Error al iniciar la generación de memoria:\n{e}", parent=self)
+
+    def _on_memoria_stop(self) -> None:
+        """Cancela la generación de memoria."""
+        if self.runner.is_running():
+            self.runner.stop()
+        self.btn_memoria_generate.configure(state="normal")
+        self.btn_memoria_stop.configure(state="disabled")
+
+    def _on_memoria_output(self, line: str) -> None:
+        """Callback para mostrar salida del proceso de memoria."""
+        self._log_memoria(line.rstrip())
+
+    def _on_memoria_finished(self, returncode: int) -> None:
+        """Callback cuando termina el proceso de memoria."""
+        self.btn_memoria_generate.configure(state="normal")
+        self.btn_memoria_stop.configure(state="disabled")
+        self._log_memoria(f"--- Proceso finalizado. Código: {returncode} ---")
+
     # ----- cierre / polling -----
 
     def _on_stop(self) -> None:
         if self.runner.is_running():
             self.runner.stop()
-        # reactivar botones de ambas pestañas
+        # reactivar botones de todas las pestañas
         if hasattr(self, "btn_stop"):
             self.btn_stop.configure(state="disabled")
         if hasattr(self, "btn_run"):
@@ -1055,6 +1388,10 @@ class AnexosApp(ctk.CTk):
             self.btn_mv_stop.configure(state="disabled")
         if hasattr(self, "btn_mv_run"):
             self.btn_mv_run.configure(state="normal")
+        if hasattr(self, "btn_memoria_stop"):
+            self.btn_memoria_stop.configure(state="disabled")
+        if hasattr(self, "btn_memoria_generate"):
+            self.btn_memoria_generate.configure(state="normal")
 
     def _on_close(self) -> None:
         # Guardar estado actual (así los cuadros vacíos quedan vacíos al reabrir)
@@ -1074,40 +1411,75 @@ class AnexosApp(ctk.CTk):
     def _poll_logs(self) -> None:
         try:
             while True:
-                line = self.log_queue.get_nowait()
-
-                # 1) Escribir SOLO UNA VEZ en la pestaña "Terminal"
-                self._log_terminal(line)
-
-                # 2) Reflejar la misma línea en los cuadros de cada pestaña
-                #    (sin que ellos vuelvan a escribir en la Terminal)
-                self._log(line)
-                self._log_mv(line)
+                item = self.log_queue.get_nowait()
+                
+                # El item puede ser una línea simple (string) o una tupla (tipo, línea)
+                if isinstance(item, tuple) and len(item) == 2:
+                    log_type, line = item
+                    
+                    # 1) Escribir en la pestaña Terminal
+                    self._log_terminal(line)
+                    
+                    # 2) Escribir en la pestaña específica
+                    if log_type == "memoria":
+                        self._log_memoria(line)
+                    elif log_type == "mv":
+                        self._log_mv(line)
+                    else:
+                        # Tipo desconocido, escribir en todas las pestañas
+                        self._log(line)
+                        self._log_mv(line)
+                        self._log_memoria(line)
+                else:
+                    # Formato anterior (string simple) - escribir en todas las pestañas
+                    line = str(item)
+                    self._log_terminal(line)
+                    self._log(line)
+                    self._log_mv(line)
+                    self._log_memoria(line)
+                
+                # 3) Forzar actualización inmediata de la UI
+                self.update_idletasks()
+                
         except queue.Empty:
             pass
 
-        # Actualizar estado de botones según si hay proceso en marcha
-        if self.runner.is_running():
-            if hasattr(self, "btn_stop"):
-                self.btn_stop.configure(state="normal")
-            if hasattr(self, "btn_run"):
-                self.btn_run.configure(state="disabled")
-            if hasattr(self, "btn_mv_stop"):
-                self.btn_mv_stop.configure(state="normal")
-            if hasattr(self, "btn_mv_run"):
-                self.btn_mv_run.configure(state="disabled")
-        else:
-            if hasattr(self, "btn_stop"):
-                self.btn_stop.configure(state="disabled")
-            if hasattr(self, "btn_run"):
-                self.btn_run.configure(state="normal")
-            if hasattr(self, "btn_mv_stop"):
-                self.btn_mv_stop.configure(state="disabled")
-            if hasattr(self, "btn_mv_run"):
-                self.btn_mv_run.configure(state="normal")
+        # Actualizar estado de botones SOLO si hay un cambio real
+        current_runner_state = self.runner.is_running()
+        if current_runner_state != self._last_runner_state:
+            self._last_runner_state = current_runner_state
+            
+            if current_runner_state:
+                # Proceso corriendo - deshabilitar botones de inicio
+                if hasattr(self, "btn_stop"):
+                    self.btn_stop.configure(state="normal")
+                if hasattr(self, "btn_run"):
+                    self.btn_run.configure(state="disabled")
+                if hasattr(self, "btn_mv_stop"):
+                    self.btn_mv_stop.configure(state="normal")
+                if hasattr(self, "btn_mv_run"):
+                    self.btn_mv_run.configure(state="disabled")
+                if hasattr(self, "btn_memoria_stop"):
+                    self.btn_memoria_stop.configure(state="normal")
+                if hasattr(self, "btn_memoria_generate"):
+                    self.btn_memoria_generate.configure(state="disabled")
+            else:
+                # Proceso parado - habilitar botones de inicio
+                if hasattr(self, "btn_stop"):
+                    self.btn_stop.configure(state="disabled")
+                if hasattr(self, "btn_run"):
+                    self.btn_run.configure(state="normal")
+                if hasattr(self, "btn_mv_stop"):
+                    self.btn_mv_stop.configure(state="disabled")
+                if hasattr(self, "btn_mv_run"):
+                    self.btn_mv_run.configure(state="normal")
+                if hasattr(self, "btn_memoria_stop"):
+                    self.btn_memoria_stop.configure(state="disabled")
+                if hasattr(self, "btn_memoria_generate"):
+                    self.btn_memoria_generate.configure(state="normal")
 
-        # Reprogramar el polling
-        self.after(100, self._poll_logs)
+        # Reprogramar el polling con frecuencia optimizada
+        self.after(100, self._poll_logs)  # Reducido de 50ms a 100ms
 
 
 

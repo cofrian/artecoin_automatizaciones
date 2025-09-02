@@ -52,7 +52,7 @@ T_ENVOL = {}
 SVG_CANDIDATES = []
 
 DEFAULT_SVG_MAIN = "A3_FOTOS_ICONO.svg"
-DEFAULT_SVG_ALT  = "Z:\\DOCUMENTACION TRABAJO\\CARPETAS PERSONAL\\JBA\\anexo edificios\\A3_FOTOS_AUDITORIA_SIN_ICONO.svg"
+DEFAULT_SVG_ALT  = "A3_FOTOS_AUDITORIA_SIN_ICONO.svg"
 
 # ===================== HELPERS =====================
 def _strip(s):
@@ -100,12 +100,15 @@ def _gather_svg_search_paths() -> list[Path]:
     candidates: list[Path] = []
     # 1) CLI (ya poblado en SVG_CANDIDATES)
     candidates.extend(SVG_CANDIDATES)
-    # 2) Rutas por defecto del usuario
+    # 2) Carpeta interfaz (misma carpeta que este script)
+    interfaz_dir = Path(__file__).parent
+    candidates.extend([interfaz_dir / DEFAULT_SVG_MAIN, interfaz_dir / DEFAULT_SVG_ALT])
+    # 3) Rutas por defecto del usuario
     base_user = Path(r"C:\Users\indiva\Documents\html_anexos")
     candidates.extend([base_user / DEFAULT_SVG_MAIN, base_user / DEFAULT_SVG_ALT])
-    # 3) Plantillas
+    # 4) Plantillas
     candidates.extend([PLANTILLAS_DIR / DEFAULT_SVG_MAIN, PLANTILLAS_DIR / DEFAULT_SVG_ALT])
-    # 4) BASE_DIR (junto al script/datos)
+    # 5) BASE_DIR (junto al script/datos)
     candidates.extend([BASE_DIR / DEFAULT_SVG_MAIN, BASE_DIR / DEFAULT_SVG_ALT])
 
     # Deduplicar manteniendo orden
@@ -251,7 +254,12 @@ def render_template(html_text: str, slot_tokens: tuple[str, ...], fotos_html: st
     return result
 
 def ensure_outdir_for_centro(centro_id: str, tipo_subdir: str) -> Path:
-    out_dir = SALIDA_BASE / f"C{_strip(centro_id)}" / tipo_subdir
+    # Si centro_id ya empieza por C, no añadir otra C (evitar CC0007)
+    clean_id = _strip(centro_id)
+    if clean_id.startswith('C'):
+        out_dir = SALIDA_BASE / clean_id / tipo_subdir
+    else:
+        out_dir = SALIDA_BASE / f"C{clean_id}" / tipo_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 

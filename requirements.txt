@@ -111,6 +111,7 @@ pyogrio==0.11.0
 pyparsing==3.2.3
 pypdf==5.9.0
 PyPDF2==3.0.1
+pdfplumber==0.11.4
 pyperclip==1.9.0
 pyppeteer==2.0.0
 pyproj==3.7.1

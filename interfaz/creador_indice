@@ -1,50 +1,92 @@
-import re
-from docxtpl import DocxTemplate
-from pathlib import Path
-from PyPDF2 import PdfReader
-import tkinter as tk
-from tkinter import filedialog
+# ================================================================
+# Generar "001_INDICE_GENERAL_COMPLETADO.docx" en TODOS los centros
+# - DRY-RUN por defecto (DO_IT=False) → solo muestra plan
+# - Si DO_IT=True → genera el índice en cada centro
+# ================================================================
 
-def contar_paginas_pdf(pdf_path):
+import re
+import unicodedata
+from pathlib import Path
+from typing import List, Dict, Optional
+from docxtpl import DocxTemplate
+from PyPDF2 import PdfReader
+import pandas as pd
+from IPython.display import display
+
+# ---------------------------
+# CONFIG
+# ---------------------------
+NAS_ROOT = Path(r"Y:\2025\1-PROYECTOS\10010_25_PR_AUDIT_ED_COLMENAR VIEJO\06_REDACCION")
+NAS_GROUPS = ["01_VARIOS EDIFICIOS", "02_UN EDIFICIO"]
+
+TEMPLATE_PATH = Path(r"Z:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\interfaz_anejos_final\word\anexos\001_INDICE GENERAL_PLANTILLA.docx")
+OUTPUT_NAME   = "001_INDICE_GENERAL_COMPLETADO.docx"
+
+TITULOS_FIJOS = [
+    "METODOLOGÍA",
+    "FACTURACIÓN ENERGÉTICA",
+    "INVENTARIO ENERGÉTICO",
+    "INVENTARIO SISTEMA CONSTRUCTIVO",
+    "REPORTAJE FOTOGRÁFICO",
+    "CERTIFICADOS ENERGÉTICOS",
+    "PLANOS",
+]
+
+CODES_WHITELIST: Optional[set] = None  # ej: {"C0003"} para probar solo uno
+DO_IT = True                          # False=plan, True=aplicar
+
+OFFSET_MEMORIA = 3
+ANCHO_LINEA    = 86
+
+# ---------------------------
+# FUNCIONES AUXILIARES
+# ---------------------------
+CODE_RE = re.compile(r"(C[-_ ]?\d{4})", re.IGNORECASE)
+
+def normalize_code(raw: str) -> str:
+    raw = raw.upper().replace(" ", "").replace("-", "").replace("_", "")
+    m = re.search(r"C(\d{4})", raw)
+    return f"C{m.group(1)}" if m else raw
+
+def best_code_from_path(path: Path) -> Optional[str]:
+    for part in reversed(path.parts):
+        m = CODE_RE.search(part.upper())
+        if m:
+            return normalize_code(m.group(1))
+    return None
+
+def contar_paginas_pdf(pdf_path: Optional[Path]) -> int:
+    if not pdf_path or not pdf_path.exists():
+        return 0
     try:
         reader = PdfReader(str(pdf_path))
         return len(reader.pages)
-    except Exception as e:
-        print(f"Error leyendo PDF {pdf_path}: {e}")
+    except Exception:
         return 0
 
-def seleccionar_carpeta():
-    root = tk.Tk()
-    root.withdraw()
-    carpeta = filedialog.askdirectory(title="Selecciona la carpeta del centro")
-    root.destroy()
-    return carpeta
-
-def _titulo_compuesto(anejo):
+def _titulo_compuesto(anejo: Dict) -> str:
     numero_txt = str(anejo.get("numero", "")).strip()
     m = re.search(r"\d+", numero_txt)
     num = m.group(0) if m else numero_txt
     base = str(anejo.get("titulo", "")).replace('_', '').strip()
     return f"ANEJO {num}: {base}".upper()
 
-def calcular_paginas_inicio(anexos, auditoria_paginas, offset_memoria=3, ancho_linea=86):
-    # offset_memoria=3: la memoria empieza en la página 3, los anejos después de la memoria
+def _visual_len(s: str) -> int:
+    return sum(1 for c in s if unicodedata.category(c)[0] != 'C')
+
+def calcular_paginas_inicio(anexos: List[Dict], auditoria_paginas: int,
+                            offset_memoria=OFFSET_MEMORIA, ancho_linea=ANCHO_LINEA) -> List[Dict]:
     pagina = offset_memoria + int(auditoria_paginas)
     out = []
     for a in anexos:
         ext = int(a.get("extension", 0))
         item = {**a}
-        item["titulo_original"] = a.get("titulo", "")
         titulo = _titulo_compuesto(a).rstrip()
-        import unicodedata
-        def visual_len(s):
-            return sum(1 for c in s if unicodedata.category(c)[0] != 'C')
-        l = visual_len(titulo)
+        l = _visual_len(titulo)
         if l < ancho_linea:
             titulo = titulo + ("_" * (ancho_linea - l))
         else:
-            count = 0
-            res = ''
+            count, res = 0, ""
             for c in titulo:
                 if count >= ancho_linea:
                     break
@@ -54,72 +96,101 @@ def calcular_paginas_inicio(anexos, auditoria_paginas, offset_memoria=3, ancho_l
             titulo = res
         item["titulo"] = titulo
         item["pagina_inicio"] = pagina
-        item["e"] = pagina
         out.append(item)
         pagina += ext
     return out
 
-def render_indice_general(template_path, output_path, auditoria_paginas, anexos,
-                          mostrar_inicio_doc1=True, offset_memoria=3, ancho_linea=86):
+def render_indice_general(template_path: Path, output_path: Path, auditoria_paginas: int, anexos: List[Dict]):
     doc = DocxTemplate(str(template_path))
-    anexos_calc = calcular_paginas_inicio(anexos, auditoria_paginas, offset_memoria=offset_memoria, ancho_linea=ancho_linea)
-    contexto = {
-        "e_aud": offset_memoria,  # La memoria (DOC. Nº1) empieza en la página 3
-        "anexos": anexos_calc,
-    }
+    anexos_calc = calcular_paginas_inicio(anexos, auditoria_paginas)
+    contexto = {"e_aud": OFFSET_MEMORIA, "anexos": anexos_calc}
     doc.render(contexto)
     doc.save(str(output_path))
 
-# --- Ejecución automática con títulos fijos y solo anejos existentes ---
-TITULOS_FIJOS = [
-    "METODOLOGÍA",
-    "FACTURACIÓN ENERGÉTICA",
-    "INVENTARIO ENERGÉTICO",
-    "INVENTARIO SISTEMA CONSTRUCTIVO",
-    "REPORTAJE FOTOGRÁFICO",
-    "CERTIFICADOS ENERGÉTICOS",
-    "PLANOS"
-]
+def find_anejos_dir(start: Path) -> Optional[Path]:
+    cand = start / "ANEJOS"
+    if cand.exists():
+        return cand
+    for sub in start.iterdir():
+        if sub.is_dir():
+            cand2 = sub / "ANEJOS"
+            if cand2.exists():
+                return cand2
+    return None
 
-base = Path(r"Z:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\interfaz_anejos_final\word\anexos")
-template = base / "001_INDICE GENERAL_PLANTILLA.docx"
-salida   = base / "001_INDICE_GENERAL_COMPLETADO.docx"
+def detect_portada(building_dir: Path) -> Optional[Path]:
+    pdfs = [p for p in building_dir.glob("*.pdf")]
+    for p in pdfs:
+        if "PORTADA" in p.stem.upper():
+            return p
+    return None
 
-carpeta_centro = seleccionar_carpeta()
-if carpeta_centro:
-    ruta = Path(carpeta_centro)
-    # Portada y auditoría
-    portada = None
-    for f in ruta.glob('*.pdf'):
-        if 'PORTADA' in f.stem.upper():
-            portada = f
-            break
-    portada_paginas = contar_paginas_pdf(portada) if portada else 1
-    auditoria = None
-    for f in ruta.glob('*.pdf'):
-        if portada and f == portada:
-            continue
-        auditoria = f
-        break
-    auditoria_paginas = contar_paginas_pdf(auditoria) if auditoria else 0
-    # Anejos: solo los que existen
-    anejos_dir = ruta / 'ANEJOS'
+def detect_auditoria(building_dir: Path, portada: Optional[Path]) -> Optional[Path]:
+    pdfs = [p for p in building_dir.glob("*.pdf")]
+    pdfs = [p for p in pdfs if p != portada and "ANEJO" not in p.stem.upper()]
+    for p in pdfs:
+        u = p.stem.upper()
+        if "AUDITORIA" in u or "AUDITORÍA" in u or "DOCUMENTO 3" in u:
+            return p
+    return pdfs[0] if pdfs else None
+
+def find_existing_anejos(anejos_dir: Path) -> List[Dict]:
     anexos = []
-    if anejos_dir.exists():
-        pdfs_anejos = list(anejos_dir.glob('*.pdf'))
-        for i, titulo_fijo in enumerate(TITULOS_FIJOS, 1):
-            patron = f"{i:02d}_ANEJO {i}."
-            encontrados = [f for f in pdfs_anejos if f.name.startswith(patron)]
-            if encontrados:
-                anejo_file = encontrados[0]
-                paginas = contar_paginas_pdf(anejo_file)
-                anexos.append({
-                    'numero': str(i),
-                    'titulo': titulo_fijo,
-                    'extension': paginas
-                })
-    # Solo se incluyen los anejos que existen
-    render_indice_general(template, salida, auditoria_paginas, anexos, offset_memoria=3, ancho_linea=86)
-    print(f"Generado: {salida}")
+    pdfs_anejos = list(anejos_dir.glob("*.pdf"))
+    for i, titulo_fijo in enumerate(TITULOS_FIJOS, 1):
+        patron = f"{i:02d}_ANEJO {i}."
+        encontrados = [f for f in pdfs_anejos if f.name.upper().startswith(patron.upper())]
+        if encontrados:
+            anejo_file = encontrados[0]
+            paginas = contar_paginas_pdf(anejo_file)
+            anexos.append({"numero": str(i), "titulo": titulo_fijo, "extension": paginas})
+    return anexos
+
+# ---------------------------
+# RECORRER CENTROS
+# ---------------------------
+plan = []
+for grp in NAS_GROUPS:
+    base = NAS_ROOT / grp
+    if not base.exists():
+        continue
+    for child in base.iterdir():
+        if not child.is_dir():
+            continue
+        code = best_code_from_path(child)
+        if CODES_WHITELIST and code not in CODES_WHITELIST:
+            continue
+        anejos = find_anejos_dir(child)
+        portada = detect_portada(child)
+        auditoria = detect_auditoria(child, portada)
+        anexos = find_existing_anejos(anejos) if anejos else []
+        plan.append(dict(
+            code=code,
+            group=grp,
+            portada=str(portada) if portada else "",
+            auditoria=str(auditoria) if auditoria else "",
+            anexos_count=len(anexos),
+            salida=str(child/OUTPUT_NAME),
+            generar=bool(anexos)
+        ))
+
+plan_df = pd.DataFrame(plan).sort_values(["group","code"]).reset_index(drop=True)
+display(plan_df.style.set_caption("PLAN de índices (DRY-RUN)"))
+
+# ---------------------------
+# EJECUCIÓN
+# ---------------------------
+if DO_IT:
+    LOG = []
+    for row in plan:
+        if not row["generar"]:
+            LOG.append(dict(code=row["code"], status="SKIP", reason="Sin anejos"))
+            continue
+        try:
+            render_indice_general(TEMPLATE_PATH, Path(row["salida"]), contar_paginas_pdf(Path(row["auditoria"])) , find_existing_anejos(Path(row["salida"]).parent/"ANEJOS"))
+            LOG.append(dict(code=row["code"], status="OK", salida=row["salida"]))
+        except Exception as e:
+            LOG.append(dict(code=row["code"], status="ERROR", error=str(e)))
+    display(pd.DataFrame(LOG).style.set_caption("RESULTADO de ejecución"))
 else:
-    print("No se seleccionó ninguna carpeta.")
+    print("\n**DRY-RUN** activo. Revisa el PLAN y pon DO_IT=True para aplicar.")
