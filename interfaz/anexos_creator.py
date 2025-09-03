@@ -622,7 +622,7 @@ class DefaultWordExporter:
 
         try:
             pythoncom.CoInitialize()
-            word_app = win32_client.Dispatch("Word.Application")
+            word_app = win32_client.DispatchEx("Word.Application")
             # word_app.Visible = False
             # word_app.ScreenUpdating = False
             try:
