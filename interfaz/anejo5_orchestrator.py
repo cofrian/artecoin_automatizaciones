@@ -340,8 +340,8 @@ def main():
             '--out', dirs['pdf'],
             '--concurrency', str(concurrency),
             '--merge-workers', str(merge_workers),
-            '--wait', '500',  # Más tiempo de espera para archivos complejos
-            '--caratulas-dir', args.caratulas_dir]
+            '--wait', '900',  # Más tiempo de espera para archivos complejos
+            '--caratulas-dir', args.caratulas_dir, '--port', '8800']
     print(f"[Anejo 5] Ejecutando con concurrency={concurrency}, merge-workers={merge_workers}: {' '.join(cmd3)}")
     print(f"[Anejo 5] Conversión HTML→PDF en tiempo real...")
     sys.stdout.flush()
