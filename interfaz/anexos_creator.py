@@ -530,7 +530,7 @@ class DefaultWordExporter:
         self, docx_path: Path, read_only: bool = False
     ) -> Tuple[CDispatch, CDispatch]:
         pythoncom.CoInitialize()
-        app: CDispatch = win32_client.Dispatch("Word.Application")
+        app: CDispatch = win32_client.DispatchEx("Word.Application")
         # app.Visible = False
         # app.ScreenUpdating = False
         try:
