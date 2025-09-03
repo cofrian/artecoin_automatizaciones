@@ -510,8 +510,8 @@ class DefaultWordExporter:
     ) -> Tuple[CDispatch, CDispatch]:
         pythoncom.CoInitialize()
         app: CDispatch = win32_client.Dispatch("Word.Application")
-        app.Visible = False
-        app.ScreenUpdating = False
+        # app.Visible = False
+        # app.ScreenUpdating = False
         try:
             app.DisplayAlerts = (
                 False  # algunos Word no lo permiten; si falla no es crítico
@@ -523,7 +523,7 @@ class DefaultWordExporter:
             ConfirmConversions=False,
             ReadOnly=read_only,
             AddToRecentFiles=False,
-            Visible=False,
+            # Visible=False,
         )
         return app, doc
 
@@ -602,8 +602,8 @@ class DefaultWordExporter:
         try:
             pythoncom.CoInitialize()
             word_app = win32_client.Dispatch("Word.Application")
-            word_app.Visible = False
-            word_app.ScreenUpdating = False
+            # word_app.Visible = False
+            # word_app.ScreenUpdating = False
             try:
                 word_app.DisplayAlerts = False
             except Exception:
@@ -621,7 +621,7 @@ class DefaultWordExporter:
                         ConfirmConversions=False,
                         ReadOnly=False,
                         AddToRecentFiles=False,
-                        Visible=False,
+                        # Visible=False,
                     )
 
                     # TOC: solo paginación (rápido) o actualización completa si se pide
@@ -754,8 +754,8 @@ class DefaultPdfInspector:
         try:
             pythoncom.CoInitialize()
             word_app = win32_client.Dispatch("Word.Application")
-            word_app.Visible = False
-            word_app.ScreenUpdating = False
+            # word_app.Visible = False
+            # word_app.ScreenUpdating = False
             try:
                 word_app.DisplayAlerts = False
             except Exception:
@@ -773,9 +773,9 @@ class DefaultPdfInspector:
                     doc = word_app.Documents.Open(
                         doc_path_str,
                         ConfirmConversions=False,
-                        ReadOnly=True,
+                        ReadOnly=False,
                         AddToRecentFiles=False,
-                        Visible=False,
+                        # Visible=False,
                     )
 
                     # Exportar a PDF usando valores numéricos directos
