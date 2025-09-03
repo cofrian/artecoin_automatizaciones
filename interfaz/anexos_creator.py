@@ -61,16 +61,38 @@ class Anexo5Generator:
         """
         import subprocess
         import sys
-        args = [sys.executable, '-u', 'anejo5_orchestrator.py',
+        # Obtener la ruta del directorio actual (donde está este archivo)
+        current_dir = Path(__file__).parent
+        orchestrator_path = current_dir / 'anejo5_orchestrator.py'
+        # Ruta correcta de las carátulas
+        caratulas_path = current_dir.parent / 'word' / 'anexos' / 'CARATULAS'
+        args = [sys.executable, '-u', str(orchestrator_path),
                 '--excel-dir', str(self.config.excel_dir),
                 '--photos-dir', str(self.config.photos_dir or ''),
                 '--html-templates-dir', str(self.config.html_templates_dir or ''),
-                '--caratulas-dir', str(self.config.output_dir or ''),
+                '--caratulas-dir', str(caratulas_path),
         ]
+        # Agregar output-dir solo si existe y no está vacío
+        if self.config.output_dir:
+            args += ['--output-dir', str(self.config.output_dir)]
         if self.config.center:
             args += ['--center', self.config.center]
-        # Limpiar argumentos vacíos
-        args = [a for a in args if a != '']
+        # Limpiar argumentos vacíos pero mantener la estructura de pares
+        clean_args = []
+        i = 0
+        while i < len(args):
+            if i == 0 or not args[i].startswith('--'):
+                # Es el ejecutable o un valor de argumento
+                clean_args.append(args[i])
+                i += 1
+            elif i + 1 < len(args) and args[i + 1] != '':
+                # Es un argumento con valor no vacío
+                clean_args.extend([args[i], args[i + 1]])
+                i += 2
+            else:
+                # Es un argumento con valor vacío, saltar ambos
+                i += 2
+        args = clean_args
         logger.info(f"[Anejo 5] Llamando orquestador: {' '.join(args)}")
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
         for line in proc.stdout:
@@ -80,7 +102,6 @@ class Anexo5Generator:
             logger.error(f"[ERROR] Orquestador terminó con código {proc.returncode}")
         else:
             logger.info("[OK] Anejo 5 completado.")
-
 
 
 
