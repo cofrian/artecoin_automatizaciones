@@ -88,6 +88,9 @@ class RunOptions:
 
     # Expresión de centros (rango/lista)
     center: Optional[str] = None
+    
+    # Photo filtering for Anejo 5
+    include_without_photos: bool = True
 
 
 
@@ -98,6 +101,7 @@ class MoveOptions:
     nas_centers_dir: str         # Carpeta del NAS con 01_Cxxxx_* / 02_Cxxxx_*
     centers_expr: Optional[str]  # Filtro opcional de centros
     dry_run: bool                # True: solo simula (no mueve)
+    word_dir: Optional[str]      # Carpeta de plantillas Word (para las plantillas del Anejo 1)
 
 
 # ---------------------------
@@ -348,6 +352,10 @@ class ProcessRunner:
 
         if getattr(opts, "center", None):
             cmd += ["--center", str(opts.center)]
+            
+        # Add photo filtering parameter for Anejo 5
+        if not opts.include_without_photos:
+            cmd += ["--exclude-without-photos"]
 
         self._launch(cmd)
 
@@ -362,6 +370,8 @@ class ProcessRunner:
         cmd += ["--action", "move-to-nas"]
         cmd += ["--local-out-root", opts.local_out_root]
         cmd += ["--nas-centers-dir", opts.nas_centers_dir]
+        if opts.word_dir:
+            cmd += ["--word-dir", opts.word_dir]
         if opts.centers_expr:
             cmd += ["--centers", opts.centers_expr]
         if opts.dry_run:
@@ -708,6 +718,18 @@ class AnexosApp(ctk.CTk):
         )
         self.entry_center.grid(row=1, column=0, sticky="w", pady=(6, 0))  # <- no 'we'
         self.entry_center.configure(state="disabled")
+        
+        # Photo filtering option for Anejo 5
+        ctk.CTkLabel(opts_frame, text="Anejo 5:", font=font_label)\
+            .grid(row=3, column=0, sticky="w", padx=10, pady=(12, 12))
+        
+        self.checkbox_include_without_photos = ctk.CTkCheckBox(
+            opts_frame, 
+            text="Incluir elementos sin fotos", 
+            variable=self.include_without_photos,
+            font=font_label
+        )
+        self.checkbox_include_without_photos.grid(row=3, column=1, columnspan=3, sticky="w", padx=10, pady=(12, 12))
 
         # --- Botonera (abajo) ---
         btn_frame = ctk.CTkFrame(main)
@@ -759,6 +781,7 @@ class AnexosApp(ctk.CTk):
 
         row(0, "Carpeta local (raíz por centro):", self.mv_local_root, self._choose_mv_local_root)
         row(1, "Carpeta NAS (carpetas de centros):", self.mv_nas_root, self._choose_mv_nas_root)
+        row(2, "Carpeta de plantillas Word:", self.word_dir, self._choose_word_synchronized)
 
         frame.grid_columnconfigure(1, weight=1)
 
@@ -827,14 +850,16 @@ class AnexosApp(ctk.CTk):
         self.entry_memoria_center.pack(fill="x", **pad)
         
         # Plantilla de índices
-        ctk.CTkLabel(config_frame, text="Plantilla de índices:").pack(**pad, anchor="w")
+        ctk.CTkLabel(config_frame, text="Plantilla de índices (001_INDICE GENERAL_PLANTILLA.docx):").pack(**pad, anchor="w")
         template_frame = ctk.CTkFrame(config_frame)
         template_frame.pack(fill="x", **pad)
         self.entry_memoria_template = ctk.CTkEntry(template_frame, textvariable=self.memoria_template_path,
-                                                  placeholder_text="Seleccionar plantilla...")
+                                                  placeholder_text="Automático si se deja vacío...")
         self.entry_memoria_template.pack(side="left", fill="x", expand=True, padx=(0, 8))
         ctk.CTkButton(template_frame, text="...", width=40, 
-                     command=self._browse_memoria_template).pack(side="right")
+                     command=self._browse_memoria_template).pack(side="right", padx=(0, 4))
+        ctk.CTkButton(template_frame, text="Reset", width=60, 
+                     command=self._reset_memoria_template).pack(side="right")
         
         # Tipo de acción
         ctk.CTkLabel(config_frame, text="Acción a realizar:").pack(**pad, anchor="w")
@@ -897,6 +922,9 @@ class AnexosApp(ctk.CTk):
         self.plans_dir = StringVar(value="")
         self.caratulas_dir = StringVar(value="")  # carpeta de carátulas (Anejo 5)
 
+        # Agregar callback para sincronizar word_dir
+        self.word_dir.trace_add('write', self._on_word_dir_changed)
+
         now = datetime.now()
         self.month_var = StringVar(value=str(now.month).zfill(2))
         self.year_var = IntVar(value=now.year)
@@ -908,6 +936,9 @@ class AnexosApp(ctk.CTk):
         # Centros
         self.center_mode = ctk.StringVar(value="all")
         self.center_value = ctk.StringVar(value="")
+        
+        # Photo filtering for Anejo 5
+        self.include_without_photos = ctk.BooleanVar(value=True)  # Default: include elements without photos
 
         # Movimiento (DEBEN existir antes de _build_move_tab)
         self.mv_local_root = StringVar(value="")
@@ -983,6 +1014,9 @@ class AnexosApp(ctk.CTk):
             # Centros (idem)
             "centers_mode": self.center_mode.get(),
             "centers": (self.center_value.get() or "").strip() if self.center_mode.get() == "one" else "",
+            
+            # Photo filtering for Anejo 5
+            "include_without_photos": bool(self.include_without_photos.get()),
 
             # Movimiento
             "mv_local_root": (self.mv_local_root.get() or "").strip(),
@@ -1015,6 +1049,13 @@ class AnexosApp(ctk.CTk):
             self.excel_dir.set(path)
 
     def _choose_word(self) -> None:
+        """Versión para la pestaña de Generación - sincronizada con Mover al NAS."""
+        path = filedialog.askdirectory(title="Selecciona carpeta de Word (plantillas)")
+        if path:
+            self.word_dir.set(path)
+
+    def _choose_word_synchronized(self) -> None:
+        """Versión sincronizada para ambas pestañas (Generación y Mover al NAS)."""
         path = filedialog.askdirectory(title="Selecciona carpeta de Word (plantillas)")
         if path:
             self.word_dir.set(path)
@@ -1067,14 +1108,40 @@ class AnexosApp(ctk.CTk):
 
     def _browse_memoria_template(self) -> None:
         path = filedialog.askopenfilename(
-            title="Selecciona la plantilla de índices",
+            title="Selecciona la plantilla de índices (001_INDICE GENERAL_PLANTILLA.docx)",
             filetypes=[("Archivos Word", "*.docx"), ("Todos los archivos", "*.*")],
             initialdir="Y:/DOCUMENTACION TRABAJO/CARPETAS PERSONAL/SO/github_app/artecoin_automatizaciones/word/anexos"
         )
         if path:
+            # Validar que sea la plantilla correcta
+            if "001_INDICE GENERAL_PLANTILLA.docx" not in Path(path).name:
+                messagebox.showwarning(
+                    APP_NAME, 
+                    "ADVERTENCIA: Esta no es la plantilla correcta para índices.\n\n"
+                    "Debe seleccionar: 001_INDICE GENERAL_PLANTILLA.docx\n"
+                    "No un anejo como: 01_ANEJO 1. METODOLOGIA_V1.docx",
+                    parent=self
+                )
+                return
             self.memoria_template_path.set(path)
 
+    def _reset_memoria_template(self) -> None:
+        """Resetea la plantilla a la por defecto del sistema."""
+        default_template = str(Path(__file__).parent.parent / "word" / "anexos" / "001_INDICE GENERAL_PLANTILLA.docx")
+        self.memoria_template_path.set(default_template)
+        messagebox.showinfo(APP_NAME, "Plantilla reseteada a la por defecto del sistema.", parent=self)
+
     # ----- eventos -----
+
+    def _on_word_dir_changed(self, *args) -> None:
+        """Callback que se ejecuta cuando cambia word_dir para mantener sincronizadas ambas pestañas."""
+        try:
+            # Guardar configuración cuando cambie word_dir
+            cfg = ConfigStore.load()
+            cfg["word_dir"] = (self.word_dir.get() or "").strip()
+            ConfigStore.save(cfg)
+        except Exception:
+            pass  # No bloquear la UI si falla el guardado
 
     def _on_center_mode_change(self) -> None:
         if self.center_mode.get() == "one":
@@ -1144,6 +1211,9 @@ class AnexosApp(ctk.CTk):
         saved_centers = (cfg.get("centers", "") or "").strip()
         self.center_value.set(saved_centers if self.center_mode.get() == "one" else "")
         self._on_center_mode_change()
+        
+        # Photo filtering for Anejo 5
+        self.include_without_photos.set(cfg.get("include_without_photos", True))
 
         # Movimiento
         self.mv_local_root.set(cfg.get("mv_local_root", ""))
@@ -1158,8 +1228,15 @@ class AnexosApp(ctk.CTk):
         self.memoria_action.set(cfg.get("memoria_action", "all"))
         
         # Establecer plantilla por defecto si no hay una guardada
-        default_template = r"Y:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\github_app\artecoin_automatizaciones\word\anexos\001_INDICE GENERAL_PLANTILLA.docx"
-        self.memoria_template_path.set(cfg.get("memoria_template_path", default_template))
+        default_template = str(Path(__file__).parent.parent / "word" / "anexos" / "001_INDICE GENERAL_PLANTILLA.docx")
+        saved_template = cfg.get("memoria_template_path", default_template)
+        
+        # Verificar que la plantilla guardada sea correcta para índices
+        if saved_template and "001_INDICE GENERAL_PLANTILLA.docx" in saved_template:
+            self.memoria_template_path.set(saved_template)
+        else:
+            # Si hay una plantilla incorrecta guardada, usar la por defecto
+            self.memoria_template_path.set(default_template)
 
 
     # ----- helpers generación -----
@@ -1201,6 +1278,7 @@ class AnexosApp(ctk.CTk):
             month=_to_int(self.month_var.get()),
             year=_to_int(self.year_var.get()),
             center=center_expr,
+            include_without_photos=bool(self.include_without_photos.get()),
         )
 
     def _ensure_output_dir(self, output_dir: Optional[str]) -> bool:
@@ -1254,6 +1332,7 @@ class AnexosApp(ctk.CTk):
             nas_centers_dir=(self.mv_nas_root.get() or "").strip(),
             centers_expr=(self.mv_centers_expr.get() or "").strip() or None,
             dry_run=bool(self.mv_dry_run.get()),
+            word_dir=(self.word_dir.get() or "").strip() or None,
         )
 
     def _on_mv_run(self) -> None:
@@ -1300,9 +1379,21 @@ class AnexosApp(ctk.CTk):
             return
             
         # Validar template path si se especifica
-        if template_path and not Path(template_path).exists():
-            messagebox.showerror(APP_NAME, f"La plantilla especificada no existe:\n{template_path}", parent=self)
-            return
+        if template_path:
+            template_path_obj = Path(template_path)
+            # Verificar si es la plantilla correcta para índices
+            if "001_INDICE GENERAL_PLANTILLA.docx" not in template_path_obj.name:
+                self._log_memoria(f"ADVERTENCIA: Template incorrecto para índices: {template_path}")
+                self._log_memoria("Debe ser '001_INDICE GENERAL_PLANTILLA.docx', no un anejo")
+                template_path = ""  # Forzar uso de plantilla por defecto
+            elif not template_path_obj.exists():
+                self._log_memoria(f"ADVERTENCIA: La plantilla especificada no existe: {template_path}")
+                self._log_memoria("Se usará la plantilla por defecto del sistema")
+                template_path = ""  # Usar plantilla por defecto
+            else:
+                self._log_memoria(f"Plantilla validada correctamente: {template_path}")
+        else:
+            self._log_memoria("No se especificó template_path, usando plantilla por defecto del sistema")
             
         # Guardar configuración
         ConfigStore.save(self._snapshot_config())
@@ -1336,7 +1427,10 @@ class AnexosApp(ctk.CTk):
                 cmd.extend(["--center", center])
             
             if template_path:
+                self._log_memoria(f"Usando template_path desde GUI: {template_path}")
                 cmd.extend(["--template-path", template_path])
+            else:
+                self._log_memoria("No se especificó template_path, usando por defecto")
             
             cmd_str = " ".join(f'"{arg}"' if " " in arg else arg for arg in cmd)
             self._log_memoria(f"CMD: {cmd_str}")

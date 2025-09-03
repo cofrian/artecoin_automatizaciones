@@ -78,7 +78,10 @@ def main():
     parser.add_argument("--caratulas-dir", required=True)
     parser.add_argument("--center", default=None)
     parser.add_argument("--output-dir", default=None, help="Carpeta de salida para los anexos finales")
+    parser.add_argument("--exclude-without-photos", action="store_true", help="Excluir elementos sin fotos del Anejo 5")
     args = parser.parse_args()
+    print(f"DEBUG ORCHESTRATOR: args recibidos: {vars(args)}")
+    print(f"DEBUG ORCHESTRATOR: exclude_without_photos = {args.exclude_without_photos}")
 
     # Obtener el directorio donde están los scripts
     script_dir = Path(__file__).parent
@@ -259,6 +262,10 @@ def main():
             '--data', dirs['json'],
             '--out', dirs['html'],
             '--tpl', args.html_templates_dir]
+    
+    # Add photo filtering parameter if specified
+    if args.exclude_without_photos:
+        cmd2.append('--exclude-without-photos')
     print(f"[Anejo 5] Ejecutando: {' '.join(cmd2)}")
     print(f"[Anejo 5] Renderizado HTML en tiempo real...")
     sys.stdout.flush()

@@ -77,12 +77,19 @@ class Anexo5Generator:
             args += ['--output-dir', str(self.config.output_dir)]
         if self.config.center:
             args += ['--center', self.config.center]
-        # Limpiar argumentos vacíos pero mantener la estructura de pares
+        if self.config.exclude_without_photos:
+            args += ['--exclude-without-photos']
+        
+        # Limpiar argumentos vacíos pero mantener la estructura de pares y flags booleanos
         clean_args = []
         i = 0
         while i < len(args):
             if i == 0 or not args[i].startswith('--'):
                 # Es el ejecutable o un valor de argumento
+                clean_args.append(args[i])
+                i += 1
+            elif args[i] == '--exclude-without-photos':
+                # Es un flag booleano sin valor
                 clean_args.append(args[i])
                 i += 1
             elif i + 1 < len(args) and args[i + 1] != '':
@@ -93,6 +100,8 @@ class Anexo5Generator:
                 # Es un argumento con valor vacío, saltar ambos
                 i += 2
         args = clean_args
+        print(f"DEBUG: args después de clean_args: {args}")
+        print(f"DEBUG: --exclude-without-photos está presente: {'--exclude-without-photos' in args}")
         logger.info(f"[Anejo 5] Llamando orquestador: {' '.join(args)}")
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
         for line in proc.stdout:
@@ -164,6 +173,7 @@ class RunConfig:
     plans_dir: Optional[Path] = None
     center: Optional[str] = None
     centers: Optional[str] = None
+    exclude_without_photos: bool = False  # Photo filtering for Anejo 5
 
     # --- MOVE-TO-NAS ---
     local_out_root: Optional[Path] = None
@@ -2446,21 +2456,56 @@ class MoveToNASService:
 
     @staticmethod
     def _files_in_center_dir(center_dir: Path) -> List[Path]:
+        logger.info(f"   Buscando archivos DOCX/PDF en: {center_dir}")
+        
         base = center_dir / "anexos"
         if not base.exists() or not base.is_dir():
+            logger.info(f"   - Subcarpeta 'anexos' no encontrada, buscando en raíz: {center_dir}")
             base = center_dir
-        return sorted(
+        else:
+            logger.info(f"   - Buscando en subcarpeta 'anexos': {base}")
+        
+        if not base.exists():
+            logger.info(f"   ✗ La carpeta no existe: {base}")
+            return []
+            
+        files = sorted(
             [p for p in base.iterdir() if p.is_file() and p.suffix.lower() in (".docx", ".pdf")],
             key=lambda p: p.name.lower()
         )
+        
+        if files:
+            logger.info(f"   ✓ Encontrados {len(files)} archivos:")
+            for f in files:
+                logger.info(f"     - {f.name}")
+        else:
+            logger.info(f"   ✗ No se encontraron archivos DOCX/PDF")
+            
+        return files
 
     def _find_nas_dest_for_center(self, center_id: str) -> Optional[Path]:
         center_id = center_id.upper()
+        
+        # Buscar primero en el nivel superior
         for d in self.nas_centers_dir.iterdir():
             if not d.is_dir():
                 continue
             if center_id in d.name.upper():
                 return d / "ANEJOS"
+        
+        # Si no encuentra en nivel superior, buscar en subdirectorios (un nivel más profundo)
+        for parent_dir in self.nas_centers_dir.iterdir():
+            if not parent_dir.is_dir():
+                continue
+            try:
+                for sub_dir in parent_dir.iterdir():
+                    if not sub_dir.is_dir():
+                        continue
+                    if center_id in sub_dir.name.upper():
+                        return sub_dir / "ANEJOS"
+            except (PermissionError, OSError):
+                continue
+                
         return None
 
     @staticmethod
@@ -2547,7 +2592,6 @@ class MoveToNASService:
         if missing:
             logger.warning("Centros no encontrados en NAS: " + ", ".join(sorted(missing)))
         return 0
-
 
 
 
@@ -2748,25 +2792,47 @@ def run_move_to_nas(config: RunConfig) -> int:
             seen.add(d)
 
     def _find_file(basename: str) -> Optional[Path]:
+        logger.info(f"Buscando '{basename}' en las siguientes carpetas:")
+        # Buscar primero en las carpetas candidatas (incluyendo word_dir)
         for d in uniq_dirs:
+            logger.info(f"  - Revisando: {d}")
             cand = d / basename
             if cand.exists():
+                logger.info(f"  ✓ Encontrado en: {cand}")
                 return cand
+        
+        # Si no se encuentra, intentar buscar en la ruta absoluta conocida como fallback
+        fallback_locations = [
+            r"Y:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\github_app\artecoin_automatizaciones\word\anexos",
+            r"Y:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\github_app\artecoin_automatizaciones_bueno\artecoin_automatizaciones\word\anexos",
+            r".\word\anexos",
+            r".\word",
+            r".\plantillas"
+        ]
+        
+        for fallback_dir in fallback_locations:
+            fallback_path = Path(fallback_dir) / basename
+            logger.info(f"  - Revisando fallback: {fallback_path.parent}")
+            if fallback_path.exists():
+                logger.info(f"  ✓ Encontrado en fallback: {fallback_path}")
+                return fallback_path
+        
+        logger.info(f"  ✗ No encontrado en ninguna ubicación")
         return None
 
-    # Localizar las plantillas del Anejo 1 (sin parámetros)
-    anexo1_docx = _find_file("Plantilla_Anexo_1.docx")
-    anexo1_pdf  = _find_file("Plantilla_Anexo_1.pdf")
+    # Localizar las plantillas del Anejo 1 (sin parámetros) - nuevo formato
+    anexo1_docx = _find_file("01_ANEJO 1. METODOLOGIA_V1.docx")
+    anexo1_pdf  = _find_file("01_ANEJO 1. METODOLOGIA_V1.pdf")
 
     anexo1_files: list[tuple[Path, str]] = []
     if anexo1_docx:
         anexo1_files.append((anexo1_docx, anexo1_docx.name))
     else:
-        logger.warning("No se encontró 'Plantilla_Anexo_1.docx' en las carpetas conocidas.")
+        logger.warning("No se encontró '01_ANEJO 1. METODOLOGIA_V1.docx' en las carpetas conocidas.")
     if anexo1_pdf:
         anexo1_files.append((anexo1_pdf, anexo1_pdf.name))
     else:
-        logger.warning("No se encontró 'Plantilla_Anexo_1.pdf' en las carpetas conocidas.")
+        logger.warning("No se encontró '01_ANEJO 1. METODOLOGIA_V1.pdf' en las carpetas conocidas.")
 
     targets = get_target_centers_from_config(config)
     svc = MoveToNASService(
@@ -2777,6 +2843,8 @@ def run_move_to_nas(config: RunConfig) -> int:
         anexo1_files=anexo1_files,
     )
     return svc.execute()
+
+
 
 
 
@@ -2802,6 +2870,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
     parser.add_argument("--plans-dir", help="Carpeta Planos (Anexo 7)")
     parser.add_argument("--center", help="Un centro: Cxxxx")
     parser.add_argument("--centers", help="Expresión de centros: C0001-C0010, C0012")
+    parser.add_argument("--exclude-without-photos", action="store_true", help="Excluir elementos sin fotos del Anejo 5")
 
     # --- MOVE-TO-NAS ---
     parser.add_argument("--local-out-root", help="Raíz local con subcarpetas Cxxxx (o Cxxxx/anexos)")
@@ -2828,6 +2897,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> RunConfig:
         plans_dir=_p(ns.plans_dir),
         center=ns.center,
         centers=ns.centers,
+        exclude_without_photos=bool(getattr(ns, 'exclude_without_photos', False)),
         # move-to-nas
         local_out_root=_p(ns.local_out_root),
         nas_centers_dir=_p(ns.nas_centers_dir),

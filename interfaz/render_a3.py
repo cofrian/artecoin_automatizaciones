@@ -44,6 +44,9 @@ SALIDA_BASE = BASE_DIR / "salida"
 # Directorios que nunca tratamos como "centro"
 IGNORED_DIRS = {"salida", "plantillas_a3_unificadas", ".git", "__pycache__"}
 
+# Control de filtrado de elementos sin fotos
+INCLUDE_WITHOUT_PHOTOS = True  # Por defecto incluye elementos sin fotos
+
 # Se rellenan dinámicamente tras parsear CLI
 TPLS = {}
 T_ENVOL = {}
@@ -269,6 +272,29 @@ def basename_noext(p: str) -> str:
     except Exception:
         return _strip(p)
 
+def has_photo(any_obj: dict) -> bool:
+    """
+    Verifica si un objeto tiene al menos una foto válida.
+    Retorna True si encuentra fotos en 'fotos' o 'fotos_paths', False en caso contrario.
+    """
+    # Verificar campo 'fotos' (lista de objetos con 'path')
+    fotos = any_obj.get("fotos") or []
+    if fotos:
+        for foto in fotos:
+            path = foto.get("path", "").strip()
+            if path and Path(path).exists():
+                return True
+    
+    # Verificar campo 'fotos_paths' (lista de rutas directas)
+    fotos_paths = any_obj.get("fotos_paths") or []
+    if fotos_paths:
+        for path in fotos_paths:
+            path_str = str(path).strip()
+            if path_str and Path(path_str).exists():
+                return True
+    
+    return False
+
 def collect_fotos(any_obj: dict) -> list[dict]:
     """
     Normaliza una lista de fotos a [{'path':..., 'file_uri':..., 'name':...}, ...]
@@ -443,6 +469,11 @@ def process_edificios(edificios_json: Path):
     add_metrics(centro_id, "edificios", in_inc=len(edificios))
 
     for e in edificios:
+        # Aplicar filtro de fotos si está habilitado
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(e):
+            print(f"[SKIP] Edificio {e.get('id', 'SINID')} - sin fotos (filtrado habilitado)")
+            continue
+            
         fotos = collect_fotos(e)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: e.get(k, "") for k in e.keys()}
@@ -485,6 +516,12 @@ def process_envolventes(envolventes_json: Path):
         if not tpl_path.exists():
             print(f"[AVISO] Falta plantilla: {tpl_path}")
             continue
+        
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(env):
+            print(f"[SKIP] Envolvente {env.get('id', 'SINID')} omitida (sin fotos)")
+            continue
+            
         tpl_html = tpl_path.read_text(encoding="utf-8")
         fotos = collect_fotos(env)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
@@ -528,6 +565,11 @@ def process_dependencias(dependencias_json: Path):
     add_metrics(centro_id, "dependencias", in_inc=len(dependencias))
 
     for dep in dependencias:
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(dep):
+            print(f"[SKIP] Dependencia {dep.get('id', 'SINID')} omitida (sin fotos)")
+            continue
+            
         fotos = collect_fotos(dep)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: dep.get(k, "") for k in dep.keys()}
@@ -568,6 +610,11 @@ def process_acometida(acom_json: Path):
     add_metrics(centro_id, "acometida", in_inc=len(acoms))
 
     for acom in acoms:
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(acom):
+            print(f"[SKIP] Acometida {acom.get('id', 'SINID')} omitida (sin fotos)")
+            continue
+            
         fotos = collect_fotos(acom)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: acom.get(k, "") for k in acom.keys()}
@@ -608,6 +655,11 @@ def process_cc(cc_json: Path):
     add_metrics(centro_id, "cc", in_inc=len(sistemas))
 
     for sis in sistemas:
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(sis):
+            print(f"[SKIP] Sistema CC {sis.get('id', 'SINID')} omitido (sin fotos)")
+            continue
+            
         fotos = collect_fotos(sis)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: sis.get(k, "") for k in sis.keys()}
@@ -648,6 +700,11 @@ def process_clima(clima_json: Path):
     add_metrics(centro_id, "clima", in_inc=len(equipos))
 
     for eq in equipos:
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(eq):
+            print(f"[SKIP] Equipo clima {eq.get('id', 'SINID')} omitido (sin fotos)")
+            continue
+            
         fotos = collect_fotos(eq)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: eq.get(k, "") for k in eq.keys()}
@@ -688,6 +745,11 @@ def process_eqhoriz(eqhoriz_json: Path):
     add_metrics(centro_id, "eqhoriz", in_inc=len(equipos))
 
     for eq in equipos:
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(eq):
+            print(f"[SKIP] Equipo horizontal {eq.get('id', 'SINID')} omitido (sin fotos)")
+            continue
+            
         fotos = collect_fotos(eq)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: eq.get(k, "") for k in eq.keys()}
@@ -728,6 +790,11 @@ def process_elevadores(eleva_json: Path):
     add_metrics(centro_id, "elevadores", in_inc=len(elevadores))
 
     for eq in elevadores:
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(eq):
+            print(f"[SKIP] Elevador {eq.get('id', 'SINID')} omitido (sin fotos)")
+            continue
+            
         fotos = collect_fotos(eq)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: eq.get(k, "") for k in eq.keys()}
@@ -768,6 +835,11 @@ def process_iluminacion(iluminacion_json: Path):
     add_metrics(centro_id, "iluminacion", in_inc=len(elementos))
 
     for eq in elementos:
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(eq):
+            print(f"[SKIP] Iluminación {eq.get('id', 'SINID')} omitida (sin fotos)")
+            continue
+            
         fotos = collect_fotos(eq)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: eq.get(k, "") for k in eq.keys()}
@@ -808,6 +880,11 @@ def process_otrosequipos(otrosequipos_json: Path):
     add_metrics(centro_id, "otros_equipos", in_inc=len(elementos))
 
     for eq in elementos:
+        # Skip elements without photos if filtering is enabled
+        if not INCLUDE_WITHOUT_PHOTOS and not has_photo(eq):
+            print(f"[SKIP] Otro equipo {eq.get('id', 'SINID')} omitido (sin fotos)")
+            continue
+            
         fotos = collect_fotos(eq)
         fotos_html = build_photos_grid(fotos, placeholders.get("main") or placeholders.get("alt"))
         flat   = {k: eq.get(k, "") for k in eq.keys()}
@@ -1009,6 +1086,7 @@ def parse_cli_and_set_paths():
     --tpl   -> carpeta de plantillas (default: <data>/plantillas_a3_unificadas)
     --svg   -> ruta a SVG placeholder principal (opcional)
     --svg2  -> ruta a SVG placeholder alternativo (opcional)
+    --include-without-photos -> incluir elementos sin fotos (default: True)
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default=os.getcwd(), help="Carpeta raíz de datos (centros o un centro).")
@@ -1016,16 +1094,22 @@ def parse_cli_and_set_paths():
     ap.add_argument("--tpl",  default=None,        help="Carpeta de plantillas (default: <data>/plantillas_a3_unificadas).")
     ap.add_argument("--svg",  default=None,        help="Ruta a SVG placeholder principal (opcional).")
     ap.add_argument("--svg2", default=None,        help="Ruta a SVG placeholder alternativo (opcional).")
+    ap.add_argument("--exclude-without-photos", action="store_true", default=False,
+                    help="Excluir elementos sin fotos del Anejo 5.")
     args = ap.parse_args()
 
     data_dir = Path(args.data).resolve()
     out_dir  = Path(args.out).resolve() if args.out else (data_dir / "salida")
     tpl_dir  = Path(args.tpl).resolve() if args.tpl else (data_dir / "plantillas_a3_unificadas")
 
-    global BASE_DIR, SALIDA_BASE, PLANTILLAS_DIR, SVG_CANDIDATES
+    global BASE_DIR, SALIDA_BASE, PLANTILLAS_DIR, SVG_CANDIDATES, INCLUDE_WITHOUT_PHOTOS
     BASE_DIR = data_dir
     SALIDA_BASE = out_dir
     PLANTILLAS_DIR = tpl_dir
+    
+    # Configurar filtrado de elementos sin fotos
+    # Por defecto incluir elementos sin fotos (True), solo excluir si se pasa --exclude-without-photos
+    INCLUDE_WITHOUT_PHOTOS = not args.exclude_without_photos
 
     # Placeholders señalados por CLI primero en prioridad
     SVG_CANDIDATES = []

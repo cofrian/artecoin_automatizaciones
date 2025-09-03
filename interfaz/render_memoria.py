@@ -2,8 +2,8 @@
 """
 Script para generar memoria final completa por centro.
 
-Este script combina dos funcionalidades:
-1. Generar índices generales (001_INDICE_GENERAL_COMPLETADO.docx)
+Este script tiene dos funcionalidades:
+1. Generar índices generales (001_INDICE_GENERAL.docx + PDF)
 2. Montar memoria completa (MEMORIA_COMPLETA.pdf)
 
 Uso:
@@ -49,17 +49,19 @@ logger = logging.getLogger(__name__)
 NAS_GROUPS = ["01_VARIOS EDIFICIOS", "02_UN EDIFICIO"]
 
 # Ruta absoluta de la plantilla de índice
-TEMPLATE_PATH = Path(r"Y:\DOCUMENTACION TRABAJO\CARPETAS PERSONAL\SO\github_app\artecoin_automatizaciones\word\anexos\001_INDICE GENERAL_PLANTILLA.docx")
+TEMPLATE_PATH = Path(__file__).parent.parent / "word" / "anexos" / "001_INDICE GENERAL_PLANTILLA.docx"
 
 TITULOS_FIJOS = [
     "METODOLOGÍA",
-    "FACTURACIÓN ENERGÉTICA", 
-    "INVENTARIO ENERGÉTICO",
+    "FACTURACIÓN ENERGÉTICA",
+    "INVENTARIO ENERGÉTICO", 
     "INVENTARIO SISTEMA CONSTRUCTIVO",
     "REPORTAJE FOTOGRÁFICO",
     "CERTIFICADOS ENERGÉTICOS",
     "PLANOS",
 ]
+
+OUTPUT_NAME = "001_INDICE_GENERAL.docx"
 
 OFFSET_MEMORIA = 3
 ANCHO_LINEA = 86
@@ -144,18 +146,27 @@ def detect_auditoria(building_dir: Path, portada: Optional[Path]) -> Optional[Pa
     return pdfs[0] if pdfs else None
 
 def find_existing_anejos(anejos_dir: Path) -> List[Dict]:
+    """Busca anejos existentes usando la lógica del creador_indice que funciona."""
     anexos = []
     if not anejos_dir or not anejos_dir.exists():
+        logger.info(f"    Directorio ANEJOS no existe: {anejos_dir}")
         return anexos
         
     pdfs_anejos = list(anejos_dir.glob("*.pdf"))
+    logger.info(f"    Encontrados {len(pdfs_anejos)} PDFs en ANEJOS: {[p.name for p in pdfs_anejos]}")
+    
+    # Usar la lógica exacta del creador_indice que funciona
     for i, titulo_fijo in enumerate(TITULOS_FIJOS, 1):
         patron = f"{i:02d}_ANEJO {i}."
         encontrados = [f for f in pdfs_anejos if f.name.upper().startswith(patron.upper())]
         if encontrados:
             anejo_file = encontrados[0]
             paginas = contar_paginas_pdf(anejo_file)
+            logger.info(f"    ✓ Anejo {i}: {anejo_file.name} ({paginas} páginas)")
             anexos.append({"numero": str(i), "titulo": titulo_fijo, "extension": paginas})
+        else:
+            logger.info(f"    ✗ Anejo {i} no encontrado con patrón: {patron}")
+            
     return anexos
 
 def _titulo_compuesto(anejo: Dict) -> str:
@@ -163,43 +174,20 @@ def _titulo_compuesto(anejo: Dict) -> str:
     m = re.search(r"\d+", numero_txt)
     num = m.group(0) if m else numero_txt
     base = str(anejo.get("titulo", "")).replace('_', '').strip()
-    return f"ANEJO {num}: {base}".upper()
+    resultado = f"ANEJO {num}: {base}".upper()
+    logger.debug(f"        _titulo_compuesto: {anejo} -> {resultado}")
+    return resultado
 
 def _visual_len(s: str) -> int:
     return sum(1 for c in s if unicodedata.category(c)[0] != 'C')
 
-def calcular_paginas_inicio(anexos: List[Dict], auditoria_paginas: int,
-                            offset_memoria=OFFSET_MEMORIA, ancho_linea=ANCHO_LINEA) -> List[Dict]:
-    pagina = offset_memoria + int(auditoria_paginas)
-    out = []
-    for a in anexos:
-        ext = int(a.get("extension", 0))
-        item = {**a}
-        titulo = _titulo_compuesto(a).rstrip()
-        l = _visual_len(titulo)
-        if l < ancho_linea:
-            titulo = titulo + ("_" * (ancho_linea - l))
-        else:
-            count, res = 0, ""
-            for c in titulo:
-                if count >= ancho_linea:
-                    break
-                if unicodedata.category(c)[0] != 'C':
-                    count += 1
-                res += c
-            titulo = res
-        item["titulo"] = titulo
-        item["pagina_inicio"] = pagina
-        out.append(item)
-        pagina += ext
-    return out
-
 def convert_docx_to_pdf(docx_path: Path) -> Optional[Path]:
-    """Convierte un archivo DOCX a PDF usando Microsoft Word."""
+    """Convierte un archivo DOCX a PDF usando Microsoft Word - mantiene mismo nombre base."""
     if not WORD_AVAILABLE:
         logger.warning("Microsoft Word no disponible. No se puede convertir DOCX a PDF")
         return None
     
+    # Generar PDF con el mismo nombre base (001_INDICE_GENERAL.pdf)
     pdf_path = docx_path.with_suffix(".pdf")
     
     try:
@@ -237,10 +225,25 @@ def convert_docx_to_pdf(docx_path: Path) -> Optional[Path]:
             pass
 
 def render_indice_general(template_path: Path, output_path: Path, auditoria_paginas: int, anexos: List[Dict]):
-    """Genera el índice general en formato DOCX y PDF."""
+    """Genera el índice general usando la lógica exacta del creador_indice que funciona."""
+    logger.info(f"    Renderizando con plantilla: {template_path}")
+    logger.info(f"    Archivo de salida: {output_path}")
+    logger.info(f"    ¿Existe la plantilla?: {template_path.exists()}")
+    
+    if not template_path.exists():
+        logger.error(f"    ERROR: Plantilla no existe en: {template_path}")
+        raise FileNotFoundError(f"Plantilla no encontrada: {template_path}")
+    
     doc = DocxTemplate(str(template_path))
     anexos_calc = calcular_paginas_inicio(anexos, auditoria_paginas)
     contexto = {"e_aud": OFFSET_MEMORIA, "anexos": anexos_calc}
+    
+    logger.info(f"    CONTEXTO PARA PLANTILLA:")
+    logger.info(f"    - e_aud: {contexto['e_aud']}")
+    logger.info(f"    - anexos: {len(contexto['anexos'])} elementos")
+    for i, anejo in enumerate(contexto['anexos']):
+        logger.info(f"      {i+1}: {anejo.get('numero', '?')} - Página {anejo.get('pagina_inicio', '?')}")
+    
     doc.render(contexto)
     doc.save(str(output_path))
     
@@ -253,32 +256,51 @@ def render_indice_general(template_path: Path, output_path: Path, auditoria_pagi
 
 def render_indice_general_mejorado(template_path: Path, output_path: Path, auditoria_paginas: int, anexos: List[Dict],
                           mostrar_inicio_doc1=True, offset_memoria=OFFSET_MEMORIA, ancho_linea=ANCHO_LINEA):
-    """Genera el índice general usando la lógica mejorada."""
-    doc = DocxTemplate(str(template_path))
-    anexos_calc = calcular_paginas_inicio_mejorado(anexos, auditoria_paginas, offset_memoria=offset_memoria, ancho_linea=ancho_linea)
-    contexto = {
-        "e_aud": offset_memoria,  # La memoria (DOC. Nº1) empieza en la página 3
-        "anexos": anexos_calc,
-    }
-    doc.render(contexto)
-    doc.save(str(output_path))
+    """Genera el índice general usando la lógica exacta del creador_indice que funciona."""
+    # Usar la función base que funciona
+    render_indice_general(template_path, output_path, auditoria_paginas, anexos)
 
-def calcular_paginas_inicio_mejorado(anexos: List[Dict], auditoria_paginas: int,
+def calcular_paginas_inicio(anexos: List[Dict], auditoria_paginas: int,
                             offset_memoria=OFFSET_MEMORIA, ancho_linea=ANCHO_LINEA) -> List[Dict]:
-    """Versión mejorada del cálculo de páginas de inicio."""
+    """Cálculo exacto del creador_indice que funciona."""
     pagina = offset_memoria + int(auditoria_paginas)
     out = []
     for a in anexos:
         ext = int(a.get("extension", 0))
         item = {**a}
-        item["titulo_original"] = a.get("titulo", "")
         titulo = _titulo_compuesto(a).rstrip()
         l = _visual_len(titulo)
         if l < ancho_linea:
             titulo = titulo + ("_" * (ancho_linea - l))
         else:
-            count = 0
-            res = ''
+            count, res = 0, ""
+            for c in titulo:
+                if count >= ancho_linea:
+                    break
+                if unicodedata.category(c)[0] != 'C':
+                    count += 1
+def calcular_paginas_inicio(anexos: List[Dict], auditoria_paginas: int,
+                            offset_memoria=OFFSET_MEMORIA, ancho_linea=ANCHO_LINEA) -> List[Dict]:
+    """Cálculo exacto del creador_indice que funciona - CORREGIDO para usar anejo.e"""
+    logger.info(f"    CALCULANDO PÁGINAS:")
+    logger.info(f"    - Offset memoria: {offset_memoria}")
+    logger.info(f"    - Páginas de auditoría: {auditoria_paginas}")
+    
+    pagina = offset_memoria + int(auditoria_paginas)
+    logger.info(f"    - Página inicial (offset + auditoría): {pagina}")
+    
+    out = []
+    for i, a in enumerate(anexos):
+        ext = int(a.get("extension", 0))
+        item = {**a}
+        
+        # Título compuesto con formato exacto
+        titulo = _titulo_compuesto(a).rstrip()
+        l = _visual_len(titulo)
+        if l < ancho_linea:
+            titulo = titulo + ("_" * (ancho_linea - l))
+        else:
+            count, res = 0, ""
             for c in titulo:
                 if count >= ancho_linea:
                     break
@@ -286,12 +308,23 @@ def calcular_paginas_inicio_mejorado(anexos: List[Dict], auditoria_paginas: int,
                     count += 1
                 res += c
             titulo = res
+        
         item["titulo"] = titulo
-        item["pagina_inicio"] = pagina
-        item["e"] = pagina
+        item["pagina_inicio"] = pagina  # para compatibilidad futura
+        item["e"] = pagina              # ⭐ CLAVE: la plantilla usa {{ anejo.e }}
+        
+        logger.info(f"    - Anejo {i+1}: {a.get('numero', '?')} - {a.get('titulo', '?')} -> Página {pagina} (extensión: {ext})")
+        
         out.append(item)
         pagina += ext
+    
+    logger.info(f"    RESULTADO: {len(out)} anejos procesados con variable 'e' para la plantilla")
     return out
+
+def calcular_paginas_inicio_mejorado(anexos: List[Dict], auditoria_paginas: int,
+                            offset_memoria=OFFSET_MEMORIA, ancho_linea=ANCHO_LINEA) -> List[Dict]:
+    """Versión mejorada del cálculo - usa la función base que funciona."""
+    return calcular_paginas_inicio(anexos, auditoria_paginas, offset_memoria, ancho_linea)
 
 # ================================================================
 # FUNCIONES PARA MEMORIA COMPLETA
@@ -595,22 +628,51 @@ def add_bookmarks_and_links_to_memoria(input_pdf: Path) -> bool:
 
 # ================================================================
 # Generar "001_INDICE_GENERAL.docx" en TODOS los centros
-# - Recorre 01_VARIOS EDIFICIOS y 02_UN EDIFICIO
+# - Recorre 01_VARIOS EDIFICIOS y 02_UN EDIFICIO  
 # - Usa tu plantilla y tu lógica de títulos/anchos/paginación
 # - Solo incluye anejos que EXISTEN (patrón "NN_ANEJO N.")
+# - Genera también PDF automáticamente con el mismo nombre
+# - Usa anejo.e en lugar de anejo.pagina_inicio para la plantilla
 # ================================================================
 
 def generar_indices(nas_root: Path, center_filter: str = None, template_path: Path = None) -> int:
     """Generar índices generales en todos los centros."""
     logger.info("=== GENERANDO ÍNDICES GENERALES ===")
     logger.info(f"NAS Root: {nas_root}")
+    logger.info(f"Template path recibido como parámetro: {template_path}")
     
-    # Usar template_path proporcionado o el valor por defecto
+    # VALIDACIÓN CRÍTICA: Asegurar que se use la plantilla correcta para índices
+    if template_path:
+        template_name = Path(template_path).name
+        if "001_INDICE GENERAL_PLANTILLA.docx" not in template_name:
+            logger.warning(f"RECHAZANDO plantilla incorrecta: {template_path}")
+            logger.warning("No es la plantilla de índice correcta, usando plantilla por defecto")
+            template_path = None
+    
+    # Usar template_path proporcionado (si es correcto) o el valor por defecto
     final_template_path = template_path or TEMPLATE_PATH
+    
+    logger.info(f"TEMPLATE_PATH por defecto: {TEMPLATE_PATH}")
+    logger.info(f"Template final a usar: {final_template_path}")
+    logger.info(f"¿Existe la plantilla?: {final_template_path.exists()}")
     
     if not final_template_path.exists():
         logger.error(f"Plantilla no encontrada: {final_template_path}")
-        return 1
+        # Buscar plantillas alternativas
+        possible_paths = [
+            Path(__file__).parent.parent / "word" / "anexos" / "001_INDICE GENERAL_PLANTILLA.docx",
+            Path(__file__).parent / "word" / "anexos" / "001_INDICE GENERAL_PLANTILLA.docx",
+            Path("Y:/DOCUMENTACION TRABAJO/CARPETAS PERSONAL/SO/github_app/artecoin_automatizaciones/word/anexos/001_INDICE GENERAL_PLANTILLA.docx"),
+        ]
+        for alt_path in possible_paths:
+            logger.info(f"Probando plantilla alternativa: {alt_path}")
+            if alt_path.exists():
+                logger.info(f"Plantilla alternativa encontrada: {alt_path}")
+                final_template_path = alt_path
+                break
+        else:
+            logger.error("No se encontró ninguna plantilla válida")
+            return 1
     
     # ---------------------------
     # Recorrer centros y generar índices
@@ -644,8 +706,13 @@ def generar_indices(nas_root: Path, center_filter: str = None, template_path: Pa
         portada_paginas = contar_paginas_pdf(portada) if portada else 1
         auditoria_paginas = contar_paginas_pdf(auditoria) if auditoria else 0
 
+        logger.info(f"    Portada: {portada.name if portada else 'No encontrada'} ({portada_paginas} páginas)")
+        logger.info(f"    Auditoría: {auditoria.name if auditoria else 'No encontrada'} ({auditoria_paginas} páginas)")
+
         # Anejos existentes
         anexos = find_existing_anejos(anejos_dir) if anejos_dir else []
+        
+        logger.info(f"- {row['code']}: Detectados {len(anexos)} anejos en {anejos_dir}")
 
         # Si no hay ningún anejo, saltar (opcional)
         if not anexos:
@@ -654,7 +721,7 @@ def generar_indices(nas_root: Path, center_filter: str = None, template_path: Pa
             continue
 
         # Renderizar índice
-        output_name = "001_INDICE_GENERAL.docx"
+        output_name = OUTPUT_NAME  # "001_INDICE_GENERAL_COMPLETADO.docx"
         out_path = building_dir / output_name
         try:
             render_indice_general_mejorado(final_template_path, out_path, auditoria_paginas, anexos,
