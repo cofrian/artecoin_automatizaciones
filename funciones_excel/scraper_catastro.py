@@ -89,15 +89,13 @@ def scrape_catastro(referencia, nombre_carpeta, base_dir, driver,
         uso = driver.execute_script('return document.querySelector("#ctl00_Contenido_tblInmueble > div:nth-child(4) > div > span > label")?.innerText || "NA";')
         superficie = driver.execute_script('return document.querySelector("#ctl00_Contenido_tblInmueble > div:nth-child(5) > div > span > label")?.innerText || "NA";')
         anio_construccion = driver.execute_script('return document.querySelector("#ctl00_Contenido_tblInmueble > div:nth-child(6) > div > span > label")?.innerText || "NA";')
-        direccion = driver.execute_script('return document.evaluate("/html/body/form/fieldset/div[2]/div[2]/div[2]/div/div[1]/div[2]/div/div[2]/div/span/label", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.innerText.trim() || "NA";')
 
         superficie_raw = superficie or ""
         superficie_limpia = superficie_raw.replace(".", "").replace(",", "").replace("m2", "").strip()
         resultados.append({
             'REF CATASTRAL': referencia,
             'SUPERF CATASTRO': superficie_limpia,
-            'AÑO CONSTRUCCIÓN': anio_construccion,
-            'DIRECCION': direccion
+            'AÑO CONSTRUCCIÓN': anio_construccion
         })
 
         # --- PDF Croquis y Datos (DOC CATASTRO) ---
@@ -208,5 +206,7 @@ def scrape_catastro(referencia, nombre_carpeta, base_dir, driver,
         except Exception:
             pass
     # NO driver.quit()
+
+
 
 
