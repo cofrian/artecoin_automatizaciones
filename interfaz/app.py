@@ -566,9 +566,13 @@ class AnexosApp(ctk.CTk):
         font_hint = ctk.CTkFont(size=18)
         font_entry = ctk.CTkFont(size=17)
 
+        # === CONTENEDOR SCROLLABLE PRINCIPAL ===
+        scrollable_frame = ctk.CTkScrollableFrame(self.tab_generacion)
+        scrollable_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        
         # === CONTENEDOR PRINCIPAL (ocupa TODO) ===
-        main = ctk.CTkFrame(self.tab_generacion)
-        main.pack(fill="both", expand=True, padx=12, pady=12)
+        main = ctk.CTkFrame(scrollable_frame)
+        main.pack(fill="both", expand=True, padx=0, pady=0)
         # Grid del contenedor principal
         main.grid_rowconfigure(0, weight=0)  # Título
         main.grid_rowconfigure(1, weight=1)  # Paths
@@ -766,10 +770,14 @@ class AnexosApp(ctk.CTk):
         font_label = ctk.CTkFont(size=18)
         font_btn = ctk.CTkFont(size=18)
 
-        ctk.CTkLabel(self.tab_move, text="Mover anexos al NAS", font=font_title)\
+        # === CONTENEDOR SCROLLABLE ===
+        scrollable_frame = ctk.CTkScrollableFrame(self.tab_move)
+        scrollable_frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+        ctk.CTkLabel(scrollable_frame, text="Mover anexos al NAS", font=font_title)\
             .pack(**pad, anchor="w")
 
-        frame = ctk.CTkFrame(self.tab_move)
+        frame = ctk.CTkFrame(scrollable_frame)
         frame.pack(fill="x", **pad)
 
         def row(r: int, label: str, var: StringVar, browse_cmd):
@@ -786,7 +794,7 @@ class AnexosApp(ctk.CTk):
         frame.grid_columnconfigure(1, weight=1)
 
         # Filtro de centros
-        filter_frame = ctk.CTkFrame(self.tab_move)
+        filter_frame = ctk.CTkFrame(scrollable_frame)
         filter_frame.pack(fill="x", **pad)
 
         ctk.CTkLabel(filter_frame, text="Filtrar centros (opcional):", font=font_label)\
@@ -801,7 +809,7 @@ class AnexosApp(ctk.CTk):
         self.mv_dry_run_chk.grid(row=0, column=2, sticky="w", padx=10, pady=10)
 
         # Botones
-        btn_frame = ctk.CTkFrame(self.tab_move)
+        btn_frame = ctk.CTkFrame(scrollable_frame)
         btn_frame.pack(fill="x", **pad)
         self.btn_mv_run = ctk.CTkButton(btn_frame, text="Mover al NAS", command=self._on_mv_run, width=160, height=42, font=font_btn)
         self.btn_mv_stop = ctk.CTkButton(btn_frame, text="Detener", command=self._on_stop, width=120, height=42, font=font_btn, state="disabled")
@@ -809,8 +817,8 @@ class AnexosApp(ctk.CTk):
         self.btn_mv_stop.pack(side="left", padx=8, pady=12)
 
         # Logs de movimiento
-        ctk.CTkLabel(self.tab_move, text="Salida:", font=ctk.CTkFont(size=20, weight="bold")).pack(**pad, anchor="w")
-        self.txt_mv_logs = ctk.CTkTextbox(self.tab_move, height=360, font=ctk.CTkFont(size=16))
+        ctk.CTkLabel(scrollable_frame, text="Salida:", font=ctk.CTkFont(size=20, weight="bold")).pack(**pad, anchor="w")
+        self.txt_mv_logs = ctk.CTkTextbox(scrollable_frame, height=360, font=ctk.CTkFont(size=16))
         self.txt_mv_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
         self._log_mv("Configura las carpetas y pulsa 'Mover al NAS'.")
 
@@ -818,12 +826,16 @@ class AnexosApp(ctk.CTk):
         """Construye la pestaña para generar memoria final."""
         pad = {"padx": 14, "pady": 8}
         
+        # === CONTENEDOR SCROLLABLE ===
+        scrollable_frame = ctk.CTkScrollableFrame(self.tab_memoria)
+        scrollable_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        
         # Título
-        ctk.CTkLabel(self.tab_memoria, text="Generar Memoria Final", 
+        ctk.CTkLabel(scrollable_frame, text="Generar Memoria Final", 
                     font=ctk.CTkFont(size=24, weight="bold")).pack(**pad, anchor="w")
         
-        # Frame principal sin scroll
-        main_frame = ctk.CTkFrame(self.tab_memoria)
+        # Frame principal
+        main_frame = ctk.CTkFrame(scrollable_frame)
         main_frame.pack(fill="both", expand=True, **pad)
         
         # Sección de configuración
@@ -887,7 +899,7 @@ class AnexosApp(ctk.CTk):
                     justify="left").pack(**pad, anchor="w")
         
         # Botones de acción
-        btn_frame = ctk.CTkFrame(self.tab_memoria)
+        btn_frame = ctk.CTkFrame(scrollable_frame)
         btn_frame.pack(fill="x", **pad)
         
         self.btn_memoria_generate = ctk.CTkButton(btn_frame, text="Generar", 
@@ -904,8 +916,8 @@ class AnexosApp(ctk.CTk):
         self.btn_memoria_stop.pack(side="left", padx=8, pady=12)
         
         # Logs de memoria
-        ctk.CTkLabel(self.tab_memoria, text="Salida:", font=ctk.CTkFont(size=20, weight="bold")).pack(**pad, anchor="w")
-        self.txt_memoria_logs = ctk.CTkTextbox(self.tab_memoria, height=360, font=ctk.CTkFont(size=16))
+        ctk.CTkLabel(scrollable_frame, text="Salida:", font=ctk.CTkFont(size=20, weight="bold")).pack(**pad, anchor="w")
+        self.txt_memoria_logs = ctk.CTkTextbox(scrollable_frame, height=360, font=ctk.CTkFont(size=16))
         self.txt_memoria_logs.pack(fill="both", expand=True, padx=14, pady=(0, 6))
         self._log_memoria("Configura la carpeta NAS y pulsa 'Generar'.")
 
