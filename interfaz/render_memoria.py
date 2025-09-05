@@ -385,244 +385,6 @@ def list_anejospdf(anejos_dir: Path) -> Dict[int, Path]:
     return out
 
 # ================================================================
-# FUNCIONES PARA MARCADORES Y ENLACES EN EL ÍNDICE
-# ================================================================
-
-def find_anejo_pages_in_pdf(pdf_path: Path, start_page: int = 3) -> dict:
-    """
-    Busca las páginas donde empiezan los anejos en el PDF.
-    
-    Args:
-        pdf_path: Ruta al PDF de memoria completa
-        start_page: Página donde empezar a buscar (por defecto 3, después de portada e índice)
-        
-    Returns:
-        dict {numero_anejo: pagina_0_indexada}
-    """
-    if not PDFPLUMBER_AVAILABLE:
-        logger.warning("pdfplumber no disponible. No se crearán enlaces en el índice.")
-        return {}
-    
-    anejo_pages = {}
-    
-    try:
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            total_pages = len(pdf.pages)
-            
-            # Buscar desde la página de inicio (3 por defecto) hasta el final
-            for page_num in range(start_page - 1, total_pages):  # Convertir a 0-indexado
-                page = pdf.pages[page_num]
-                text = page.extract_text() or ""
-                
-                # Buscar patrones como "ANEJO 1", "ANEJO 2", etc. al inicio de página
-                lines = text.split('\n')[:10]  # Solo las primeras 10 líneas de la página
-                
-                for line in lines:
-                    line = line.strip().upper()
-                    if line.startswith('ANEJO '):
-                        # Extraer el número del anejo
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            try:
-                                num_str = parts[1].rstrip(':.,')
-                                anejo_num = int(num_str)
-                                if anejo_num not in anejo_pages:
-                                    anejo_pages[anejo_num] = page_num
-                                    logger.debug(f"   -> Encontrado ANEJO {anejo_num} en página {page_num + 1}")
-                                    break
-                            except ValueError:
-                                continue
-                                
-    except Exception as e:
-        logger.warning(f"Error buscando anejos en PDF: {e}")
-    
-    return anejo_pages
-
-def find_index_clickable_areas(pdf_path: Path, index_page: int = 2) -> dict:
-    """
-    Encuentra las áreas clicables en el índice para cada anejo.
-    
-    Args:
-        pdf_path: Ruta al PDF
-        index_page: Número de página del índice (por defecto 2)
-        
-    Returns:
-        dict {numero_anejo: (x0, y0, x1, y1)}
-    """
-    if not PDFPLUMBER_AVAILABLE:
-        return {}
-    
-    clickable_areas = {}
-    
-    try:
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            page = pdf.pages[index_page - 1]  # Convertir a 0-indexado
-            width = page.width
-            
-            # Extraer palabras con sus posiciones
-            words = page.extract_words()
-            
-            for i, word in enumerate(words):
-                if word['text'].upper() == 'ANEJO':
-                    # Buscar el número en la siguiente palabra
-                    if i + 1 < len(words):
-                        next_word = words[i + 1]
-                        try:
-                            anejo_num = int(next_word['text'].rstrip(':.,'))
-                            
-                            # Crear área clicable desde "ANEJO" hasta el final de la línea
-                            x0 = word['x0']
-                            y0 = min(word['top'], next_word['top']) - 2
-                            x1 = width - 20  # Casi todo el ancho de la línea
-                            y1 = max(word['bottom'], next_word['bottom']) + 2
-                            
-                            clickable_areas[anejo_num] = (x0, y0, x1, y1)
-                            logger.debug(f"   -> Área clicable para ANEJO {anejo_num}: ({x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f})")
-                            
-                        except ValueError:
-                            continue
-                            
-    except Exception as e:
-        logger.warning(f"Error buscando áreas clicables: {e}")
-    
-    return clickable_areas
-
-def add_bookmarks_and_links_to_memoria(input_pdf: Path) -> bool:
-    """
-    Añade marcadores y enlaces clicables al PDF de memoria completa.
-    
-    Args:
-        input_pdf: Ruta al PDF original (MEMORIA_COMPLETA.pdf)
-        
-    Returns:
-        bool: True si se añadieron correctamente, False si hubo error
-    """
-    try:
-        # Crear archivo de salida con sufijo _LINKS
-        output_pdf = input_pdf.parent / f"{input_pdf.stem}_LINKS{input_pdf.suffix}"
-        
-        # Intentar usar pypdf primero (mejor compatibilidad)
-        try:
-            from pypdf import PdfReader, PdfWriter
-            using_pypdf = True
-            logger.debug("Usando pypdf para generar enlaces")
-        except ImportError:
-            # Fallback a PyPDF2
-            from PyPDF2 import PdfReader, PdfWriter
-            using_pypdf = False
-            logger.debug("Usando PyPDF2 para generar enlaces")
-        
-        reader = PdfReader(str(input_pdf))
-        writer = PdfWriter()
-        
-        # Copiar todas las páginas
-        for page in reader.pages:
-            writer.add_page(page)
-        
-        total_pages = len(reader.pages)
-        if total_pages < 3:
-            logger.warning(f"PDF tiene menos de 3 páginas ({total_pages}). No se añadirán enlaces.")
-            return False
-        
-        # Páginas fijas
-        PAGE_PORTADA = 1
-        PAGE_INDICE = 2
-        PAGE_AUDITORIA = 3
-        
-        # Añadir marcadores fijos
-        try:
-            if hasattr(writer, 'add_outline_item'):
-                writer.add_outline_item("PORTADA", 0)  # Página 1 = índice 0
-                writer.add_outline_item("ÍNDICE GENERAL", 1)  # Página 2 = índice 1
-                writer.add_outline_item("DOCUMENTO Nº1. AUDITORÍA", 2)  # Página 3 = índice 2
-            elif hasattr(writer, 'addBookmark'):
-                writer.addBookmark("PORTADA", 0)
-                writer.addBookmark("ÍNDICE GENERAL", 1)
-                writer.addBookmark("DOCUMENTO Nº1. AUDITORÍA", 2)
-        except Exception as e:
-            logger.warning(f"Error añadiendo marcadores fijos: {e}")
-        
-        # Buscar páginas de anejos
-        anejo_pages = find_anejo_pages_in_pdf(input_pdf, PAGE_AUDITORIA)
-        
-        # Añadir marcadores para anejos
-        for anejo_num in sorted(anejo_pages.keys()):
-            page_idx = anejo_pages[anejo_num]
-            try:
-                if hasattr(writer, 'add_outline_item'):
-                    writer.add_outline_item(f"ANEJO {anejo_num}", page_idx)
-                elif hasattr(writer, 'addBookmark'):
-                    writer.addBookmark(f"ANEJO {anejo_num}", page_idx)
-            except Exception as e:
-                logger.warning(f"Error añadiendo marcador ANEJO {anejo_num}: {e}")
-        
-        # Buscar áreas clicables en el índice
-        clickable_areas = find_index_clickable_areas(input_pdf, PAGE_INDICE)
-        
-        # Añadir enlaces clicables en el índice
-        links_added = 0
-        index_page_idx = PAGE_INDICE - 1  # Convertir a 0-indexado
-        
-        for anejo_num, rect in clickable_areas.items():
-            if anejo_num in anejo_pages:
-                dest_page = anejo_pages[anejo_num]
-                try:
-                    if using_pypdf:
-                        # pypdf tiene mejor soporte para enlaces
-                        if hasattr(writer, 'add_annotation'):
-                            from pypdf.annotations import Link
-                            link = Link(
-                                rect=rect,
-                                target_page_index=dest_page
-                            )
-                            writer.add_annotation(page_number=index_page_idx, annotation=link)
-                            links_added += 1
-                        elif hasattr(writer, 'add_link'):
-                            writer.add_link(index_page_idx, dest_page, rect)
-                            links_added += 1
-                    else:
-                        # PyPDF2 - intentar nueva API primero
-                        try:
-                            if hasattr(writer, 'add_annotation'):
-                                from PyPDF2.generic import AnnotationBuilder
-                                link_annotation = AnnotationBuilder.link(
-                                    rect=rect,
-                                    target_page_index=dest_page
-                                )
-                                writer.add_annotation(page_number=index_page_idx, annotation=link_annotation)
-                                links_added += 1
-                            else:
-                                # API antigua de PyPDF2
-                                if hasattr(writer, 'addLink'):
-                                    writer.addLink(index_page_idx, dest_page, rect, [0, 0, 0])
-                                    links_added += 1
-                        except (ImportError, AttributeError) as e:
-                            logger.debug(f"No se pudo usar API moderna de PyPDF2: {e}")
-                            # Como último recurso, solo añadir marcadores
-                            pass
-                            
-                except Exception as e:
-                    logger.warning(f"Error añadiendo enlace para ANEJO {anejo_num}: {e}")
-        
-        # Guardar el PDF con marcadores y enlaces
-        with open(output_pdf, 'wb') as f:
-            writer.write(f)
-        
-        logger.info(f"   -> Marcadores añadidos: {3 + len(anejo_pages)}")
-        if links_added > 0:
-            logger.info(f"   -> Enlaces clicables añadidos: {links_added}")
-        else:
-            logger.info(f"   -> Enlaces clicables: No soportados con esta versión de PyPDF2")
-            logger.info(f"   -> (Solo se añadieron marcadores de navegación)")
-        logger.info(f"   -> PDF con navegación guardado: {output_pdf.name}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error añadiendo marcadores y enlaces: {e}")
-        return False
-
-# ================================================================
 # FUNCIONES PRINCIPALES
 # ================================================================
 
@@ -791,7 +553,10 @@ def generar_memoria_completa(nas_root: Path, center_filter: str = None) -> int:
                 if pdf_ok(anejos[n]):
                     order_files.append(anejos[n])
 
-            output_name = "MEMORIA_COMPLETA.pdf"
+            # Generar nombre de archivo con formato: 01_DOCUMENTO 1. AUDITORIA ENERGETICA_{NOMBRE_CARPETA}.pdf
+            folder_name = child.name.replace(" ", "_").replace("-", "_")
+            output_name = f"01_DOCUMENTO 1. AUDITORIA ENERGETICA_{folder_name}.pdf"
+            
             centros.append({
                 "group": grp,
                 "code": code,
@@ -830,17 +595,7 @@ def generar_memoria_completa(nas_root: Path, center_filter: str = None) -> int:
             merger.close()
             logger.info(f"- {c['code']}: ✓ Memoria completa generada ({len(files)} archivos)")
             
-            # Añadir marcadores y enlaces clicables
-            logger.info(f"- {c['code']}: Añadiendo marcadores y enlaces clicables...")
-            enlaces_ok = add_bookmarks_and_links_to_memoria(out_path)
-            
-            status_msg = "OK"
-            if enlaces_ok:
-                status_msg += " + ENLACES"
-            else:
-                status_msg += " (sin enlaces)"
-            
-            resultados.append({"code": c["code"], "status": status_msg, "archivos": len(files), "salida": str(out_path)})
+            resultados.append({"code": c["code"], "status": "OK", "archivos": len(files), "salida": str(out_path)})
         except Exception as e:
             logger.error(f"- {c['code']}: ERROR - {e}")
             resultados.append({"code": c["code"], "status": "ERROR", "error": str(e)})
@@ -865,13 +620,9 @@ def main():
     missing_deps = []
     if not WORD_AVAILABLE:
         missing_deps.append("pywin32 (para conversión DOCX→PDF)")
-    if not PDFPLUMBER_AVAILABLE:
-        missing_deps.append("pdfplumber (para enlaces clicables en el índice)")
         
     if missing_deps:
         logger.warning(f"Dependencias opcionales no disponibles: {', '.join(missing_deps)}")
-        if not PDFPLUMBER_AVAILABLE:
-            logger.warning("Sin pdfplumber no se crearán enlaces clicables en el índice.")
         logger.warning("La funcionalidad estará limitada pero el script seguirá funcionando.")
     
     # Convertir a Path
@@ -900,8 +651,7 @@ def main():
         logger.info("=== PROCESO COMPLETADO ===")
         logger.info("Archivos generados:")
         logger.info("- 001_INDICE_GENERAL.docx + .pdf (si se ejecutó 'indices')")
-        logger.info("- MEMORIA_COMPLETA.pdf (versión básica)")
-        logger.info("- MEMORIA_COMPLETA_LINKS.pdf (con marcadores y enlaces clicables)")
+        logger.info("- 01_DOCUMENTO 1. AUDITORIA ENERGETICA_{NOMBRE_CARPETA}.pdf")
         return 0
         
     except Exception as e:
@@ -910,3 +660,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
